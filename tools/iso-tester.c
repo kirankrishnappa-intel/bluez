@@ -154,6 +154,19 @@
 #define QOS_48_4_2 QOS_OUT(10000, 100, 120, 0x02, 13)
 #define QOS_48_5_2 QOS_OUT(7500, 75, 117, 0x02, 13)
 #define QOS_48_6_2 QOS_OUT(10000, 100, 155, 0x02, 13)
+/* QoS configuration support setting requirements for the UGG and UGT */
+#define QOS_16_1_gs QOS(7500, 15, 30, 0x02, 1)
+#define QOS_16_2_gs QOS(10000, 20, 40, 0x02, 1)
+#define QOS_32_1_gs QOS(7500, 15, 60, 0x02, 1)
+#define QOS_32_2_gs QOS(10000, 20, 80, 0x02, 1)
+#define QOS_48_1_gs QOS(7500, 15, 75, 0x02, 1)
+#define QOS_48_2_gs QOS(10000, 20, 100, 0x02, 1)
+#define QOS_32_1_gr QOS(7500, 15, 60, 0x02, 1)
+#define QOS_32_2_gr QOS(10000, 20, 80, 0x02, 1)
+#define QOS_48_1_gr QOS(7500, 15, 75, 0x02, 1)
+#define QOS_48_2_gr QOS(10000, 20, 100, 0x02, 1)
+#define QOS_48_3_gr QOS(7500, 15, 90, 0x02, 1)
+#define QOS_48_4_gr QOS(10000, 20, 120, 0x02, 1)
 
 /* One unidirectional CIS. Unicast Server is Audio Sink */
 #define AC_1_4 QOS_OUT(10000, 10, 40, 0x02, 2)
@@ -294,22 +307,81 @@
 #define QOS_OUT_1_1_16_2_1 BCAST_QOS_OUT_1_1(10000, 10, 40, 0x02, 2)
 #define QOS_IN_16_2_1 BCAST_QOS_IN(10000, 10, 40, 0x02, 2)
 #define QOS_IN_ENC_16_2_1 BCAST_QOS_IN_ENC(10000, 10, 40, 0x02, 2)
+#define QOS_OUT_48_1_g BCAST_QOS_OUT(7500, 8, 75, 0x02, 1)
+#define QOS_OUT_48_2_g BCAST_QOS_OUT(10000, 10, 100, 0x02, 1)
+#define QOS_OUT_48_3_g BCAST_QOS_OUT(7500, 8, 90, 0x02, 1)
+#define QOS_OUT_48_4_g BCAST_QOS_OUT(10000, 10, 120, 0x02, 1)
 
-static const uint8_t base_lc3_16_2_1[] = {
-	0x28, 0x00, 0x00, /* Presentation Delay */
-	0x01, /* Number of Subgroups */
-	0x01, /* Number of BIS */
-	0x06, 0x00, 0x00, 0x00, 0x00, /* Code ID = LC3 (0x06) */
-	0x11, /* Codec Specific Configuration */
-	0x02, 0x01, 0x03, /* 16 KHZ */
-	0x02, 0x02, 0x01, /* 10 ms */
-	0x05, 0x03, 0x01, 0x00, 0x00, 0x00,  /* Front Left */
-	0x03, 0x04, 0x28, 0x00, /* Frame Length 40 bytes */
-	0x04, /* Metadata */
-	0x03, 0x02, 0x02, 0x00, /* Audio Context: Convertional */
-	0x01, /* BIS */
-	0x00, /* Codec Specific Configuration */
-};
+#define BASE(_pd, _sgrp, _nbis, _cfg...) \
+{ \
+	_pd & 0xff, _pd >> 8, _pd >> 16, \
+	_sgrp, \
+	_nbis, \
+	_cfg \
+}
+
+#define LC3_BASE(_pd, _sgrp, _nbis, _cc...) \
+	BASE(_pd, _sgrp, _nbis, 0x06, 0x00, 0x00, 0x00, 0x00, _cc)
+
+/* 16 KHZ - 10 ms - Front Left - Frame Length 40 bytes */
+#define LC3_CONFIG_16_2_1 \
+	0x10, \
+	0x02, 0x01, 0x03, \
+	0x02, 0x02, 0x01, \
+	0x05, 0x03, 0x01, 0x00, 0x00, 0x00, \
+	0x03, 0x04, 0x28, 0x00
+
+/* Audio Context: Convertional */
+#define CTXT_CONVERSIONAL \
+	0x04, \
+	0x03, 0x02, 0x02, 0x00
+
+static const uint8_t base_lc3_16_2_1[] =
+	LC3_BASE(40000, 1, 1, LC3_CONFIG_16_2_1, CTXT_CONVERSIONAL,
+		0x01, /* BIS */
+		0x00  /* Codec Specific Configuration */);
+
+#define LC3_CONFIG_G(_freq, _dur, _len) \
+	0x0a, \
+	0x02, 0x01, _freq, \
+	0x02, 0x02, _dur, \
+	0x03, 0x04, _len, _len >> 8
+
+#define LC3_CONFIG_FRONT_LEFT \
+	0x06, \
+	0x05, 0x03, 0x01, 0x00, 0x00, 0x00
+
+/* 48 KHZ - 7.5 ms - Frame Length 75 bytes */
+#define LC3_CONFIG_48_1_G \
+	LC3_CONFIG_G(0x08, 0x00, 75)
+
+static const uint8_t base_lc3_48_1_g[] =
+	LC3_BASE(10000, 1, 1, LC3_CONFIG_48_1_G, CTXT_CONVERSIONAL,
+			0x01, LC3_CONFIG_FRONT_LEFT);
+
+/* 48 KHZ - 10 ms Frame Length 100 bytes */
+#define LC3_CONFIG_48_2_G \
+	LC3_CONFIG_G(0x08, 0x01, 100)
+
+static const uint8_t base_lc3_48_2_g[] =
+	LC3_BASE(10000, 1, 1, LC3_CONFIG_48_2_G, CTXT_CONVERSIONAL,
+			0x01, LC3_CONFIG_FRONT_LEFT);
+
+/* 48 KHZ - 7.5 ms Frame Length 90 bytes */
+#define LC3_CONFIG_48_3_G \
+	LC3_CONFIG_G(0x08, 0x00, 90)
+
+static const uint8_t base_lc3_48_3_g[] =
+	LC3_BASE(10000, 1, 1, LC3_CONFIG_48_3_G, CTXT_CONVERSIONAL,
+			0x01, LC3_CONFIG_FRONT_LEFT);
+
+/* 48 KHZ - 7.5 ms Frame Length 90 bytes */
+#define LC3_CONFIG_48_4_G \
+	LC3_CONFIG_G(0x08, 0x00, 120)
+
+static const uint8_t base_lc3_48_4_g[] =
+	LC3_BASE(10000, 1, 1, LC3_CONFIG_48_3_G, CTXT_CONVERSIONAL,
+			0x01, LC3_CONFIG_FRONT_LEFT);
 
 /* Single Audio Channel. One BIS. */
 #define BCAST_AC_12 BCAST_QOS_OUT_1_1(10000, 10, 40, 0x02, 2)
@@ -810,6 +882,66 @@ static const struct iso_client_data connect_48_6_2 = {
 	.expect_err = 0
 };
 
+static const struct iso_client_data connect_16_1_gs = {
+	.qos = QOS_16_1_gs,
+	.expect_err = 0
+};
+
+static const struct iso_client_data connect_16_2_gs = {
+	.qos = QOS_16_2_gs,
+	.expect_err = 0
+};
+
+static const struct iso_client_data connect_32_1_gs = {
+	.qos = QOS_32_1_gs,
+	.expect_err = 0
+};
+
+static const struct iso_client_data connect_32_2_gs = {
+	.qos = QOS_32_2_gs,
+	.expect_err = 0
+};
+
+static const struct iso_client_data connect_48_1_gs = {
+	.qos = QOS_48_1_gs,
+	.expect_err = 0
+};
+
+static const struct iso_client_data connect_48_2_gs = {
+	.qos = QOS_48_2_gs,
+	.expect_err = 0
+};
+
+static const struct iso_client_data connect_32_1_gr = {
+	.qos = QOS_32_1_gr,
+	.expect_err = 0
+};
+
+static const struct iso_client_data connect_32_2_gr = {
+	.qos = QOS_32_2_gr,
+	.expect_err = 0
+};
+
+static const struct iso_client_data connect_48_1_gr = {
+	.qos = QOS_48_1_gr,
+	.expect_err = 0
+};
+
+static const struct iso_client_data connect_48_2_gr = {
+	.qos = QOS_48_2_gr,
+	.expect_err = 0
+};
+
+static const struct iso_client_data connect_48_3_gr = {
+	.qos = QOS_48_3_gr,
+	.expect_err = 0
+};
+
+static const struct iso_client_data connect_48_4_gr = {
+	.qos = QOS_48_4_gr,
+	.expect_err = 0
+};
+
 static const struct iso_client_data connect_invalid = {
 	.qos = QOS(0, 0, 0, 0, 0),
 	.expect_err = -EINVAL
@@ -1091,6 +1223,38 @@ static const struct iso_client_data connect_ac_1_2_cig_1_2 = {
 	.qos_2 = AC_2_10_2,
 	.expect_err = 0,
 	.mconn = true,
+};
+
+static const struct iso_client_data bcast_48_1_g = {
+	.qos = QOS_OUT_48_1_g,
+	.expect_err = 0,
+	.bcast = true,
+	.base = base_lc3_48_1_g,
+	.base_len = sizeof(base_lc3_48_1_g),
+};
+
+static const struct iso_client_data bcast_48_2_g = {
+	.qos = QOS_OUT_48_2_g,
+	.expect_err = 0,
+	.bcast = true,
+	.base = base_lc3_48_2_g,
+	.base_len = sizeof(base_lc3_48_2_g),
+};
+
+static const struct iso_client_data bcast_48_3_g = {
+	.qos = QOS_OUT_48_3_g,
+	.expect_err = 0,
+	.bcast = true,
+	.base = base_lc3_48_3_g,
+	.base_len = sizeof(base_lc3_48_3_g),
+};
+
+static const struct iso_client_data bcast_48_4_g = {
+	.qos = QOS_OUT_48_4_g,
+	.expect_err = 0,
+	.bcast = true,
+	.base = base_lc3_48_4_g,
+	.base_len = sizeof(base_lc3_48_4_g),
 };
 
 static const struct iso_client_data bcast_16_2_1_send = {
@@ -2944,6 +3108,54 @@ int main(int argc, char *argv[])
 
 	test_iso("ISO QoS 48_6_2 - Success", &connect_48_6_2, setup_powered,
 							test_connect);
+
+	test_iso("ISO QoS 16_1_gs - Success", &connect_16_1_gs, setup_powered,
+							test_connect);
+
+	test_iso("ISO QoS 16_2_gs - Success", &connect_16_2_gs, setup_powered,
+							test_connect);
+
+	test_iso("ISO QoS 32_1_gs - Success", &connect_32_1_gs, setup_powered,
+							test_connect);
+
+	test_iso("ISO QoS 32_2_gs - Success", &connect_32_2_gs, setup_powered,
+							test_connect);
+
+	test_iso("ISO QoS 48_1_gs - Success", &connect_48_1_gs, setup_powered,
+							test_connect);
+
+	test_iso("ISO QoS 48_2_gs - Success", &connect_48_2_gs, setup_powered,
+							test_connect);
+
+	test_iso("ISO QoS 32_1_gr - Success", &connect_32_1_gr, setup_powered,
+							test_connect);
+
+	test_iso("ISO QoS 32_2_gr - Success", &connect_32_2_gr, setup_powered,
+							test_connect);
+
+	test_iso("ISO QoS 48_1_gr - Success", &connect_48_1_gr, setup_powered,
+							test_connect);
+
+	test_iso("ISO QoS 48_2_gr - Success", &connect_48_2_gr, setup_powered,
+							test_connect);
+
+	test_iso("ISO QoS 48_3_gr - Success", &connect_48_3_gr, setup_powered,
+							test_connect);
+
+	test_iso("ISO QoS 48_4_gr - Success", &connect_48_4_gr, setup_powered,
+							test_connect);
+
+	test_iso("ISO QoS 48_1_g - Success", &bcast_48_1_g,
+						setup_powered, test_bcast);
+
+	test_iso("ISO QoS 48_2_g - Success", &bcast_48_2_g,
+						setup_powered, test_bcast);
+
+	test_iso("ISO QoS 48_3_g - Success", &bcast_48_3_g,
+						setup_powered, test_bcast);
+
+	test_iso("ISO QoS 48_4_g - Success", &bcast_48_4_g,
+						setup_powered, test_bcast);
 
 	test_iso("ISO QoS - Invalid", &connect_invalid, setup_powered,
 							test_connect);

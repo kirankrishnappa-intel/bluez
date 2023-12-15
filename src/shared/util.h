@@ -118,7 +118,8 @@ struct util_bit_debugger {
 	const char *str;
 };
 
-uint64_t util_debug_bit(uint64_t val, const struct util_bit_debugger *table,
+uint64_t util_debug_bit(const char *label, uint64_t val,
+				const struct util_bit_debugger *table,
 				util_debug_func_t func, void *user_data);
 
 #define UTIL_LTV_DEBUG(_type, _func) \
@@ -134,7 +135,7 @@ struct util_ltv_debugger {
 };
 
 bool util_debug_ltv(const uint8_t *data, uint8_t len,
-			struct util_ltv_debugger *debugger, size_t num,
+			const struct util_ltv_debugger *debugger, size_t num,
 			util_debug_func_t function, void *user_data);
 
 unsigned char util_get_dt(const char *parent, const char *name);

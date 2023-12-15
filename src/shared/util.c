@@ -139,7 +139,8 @@ void util_hexdump(const char dir, const unsigned char *buf, size_t len,
 }
 
 /* Helper to print debug information of bitfields */
-uint64_t util_debug_bit(uint64_t val, const struct util_bit_debugger *table,
+uint64_t util_debug_bit(const char *label, uint64_t val,
+				const struct util_bit_debugger *table,
 				util_debug_func_t function, void *user_data)
 {
 	uint64_t mask = val;
@@ -147,7 +148,8 @@ uint64_t util_debug_bit(uint64_t val, const struct util_bit_debugger *table,
 
 	for (i = 0; table[i].str; i++) {
 		if (val & (((uint64_t) 1) << table[i].bit)) {
-			util_debug(function, user_data, "%s", table[i].str);
+			util_debug(function, user_data, "%s%s", label,
+							table[i].str);
 			mask &= ~(((uint64_t) 1) << table[i].bit);
 		}
 	}
@@ -155,8 +157,8 @@ uint64_t util_debug_bit(uint64_t val, const struct util_bit_debugger *table,
 	return mask;
 }
 
-static struct util_ltv_debugger*
-ltv_debugger(struct util_ltv_debugger *debugger, size_t num, uint8_t type)
+static const struct util_ltv_debugger*
+ltv_debugger(const struct util_ltv_debugger *debugger, size_t num, uint8_t type)
 {
 	size_t i;
 
@@ -164,7 +166,7 @@ ltv_debugger(struct util_ltv_debugger *debugger, size_t num, uint8_t type)
 		return NULL;
 
 	for (i = 0; i < num; i++) {
-		struct util_ltv_debugger *debug = &debugger[i];
+		const struct util_ltv_debugger *debug = &debugger[i];
 
 		if (debug->type == type)
 			return debug;
@@ -175,7 +177,7 @@ ltv_debugger(struct util_ltv_debugger *debugger, size_t num, uint8_t type)
 
 /* Helper to print debug information of LTV entries */
 bool util_debug_ltv(const uint8_t *data, uint8_t len,
-			struct util_ltv_debugger *debugger, size_t num,
+			const struct util_ltv_debugger *debugger, size_t num,
 			util_debug_func_t function, void *user_data)
 {
 	struct iovec iov;
@@ -186,7 +188,7 @@ bool util_debug_ltv(const uint8_t *data, uint8_t len,
 
 	for (i = 0; iov.iov_len; i++) {
 		uint8_t l, t, *v;
-		struct util_ltv_debugger *debug;
+		const struct util_ltv_debugger *debug;
 
 		if (!util_iov_pull_u8(&iov, &l)) {
 			util_debug(function, user_data,
@@ -773,6 +775,7 @@ static const struct {
 	{ 0x1854, "Hearing Aid"					},
 	{ 0x1855, "Telephony and Media Audio"			},
 	{ 0x1856, "Public Broadcast Announcement"		},
+	{ 0x1858, "Gaming Audio"				},
 	/* 0x1857 to 0x27ff undefined */
 	{ 0x2800, "Primary Service"				},
 	{ 0x2801, "Secondary Service"				},
@@ -1081,6 +1084,11 @@ static const struct {
 	{ 0x2bda, "Hearing Aid Features"			},
 	{ 0x2bdb, "Hearing Aid Preset Control Point"		},
 	{ 0x2bdc, "Active Preset Index"				},
+	{ 0x2c00, "GMAP Role"					},
+	{ 0x2c01, "UGG Features"				},
+	{ 0x2c02, "UGT Features"				},
+	{ 0x2c03, "BGS Features"				},
+	{ 0x2c03, "BGR Features"				},
 	/* vendor defined */
 	{ 0xfeff, "GN Netcom"					},
 	{ 0xfefe, "GN ReSound A/S"				},
