@@ -683,7 +683,8 @@ static void print_ltv(const char *str, void *user_data)
 }
 
 static bool print_ase_lv(const struct l2cap_frame *frame, const char *label,
-			struct util_ltv_debugger *decoder, size_t decoder_len)
+			const struct util_ltv_debugger *decoder,
+			size_t decoder_len)
 {
 	struct bt_hci_lv_data *lv;
 
@@ -705,7 +706,8 @@ static bool print_ase_lv(const struct l2cap_frame *frame, const char *label,
 }
 
 static bool print_ase_cc(const struct l2cap_frame *frame, const char *label,
-			struct util_ltv_debugger *decoder, size_t decoder_len)
+			const struct util_ltv_debugger *decoder,
+			size_t decoder_len)
 {
 	return print_ase_lv(frame, label, decoder, decoder_len);
 }
@@ -813,7 +815,7 @@ done:
 		print_hex_field("    Data", frame.data, frame.size);
 }
 
-struct util_ltv_debugger ase_metadata_table[] = {
+static const struct util_ltv_debugger ase_metadata_table[] = {
 	UTIL_LTV_DEBUG(0x01, ase_debug_preferred_context),
 	UTIL_LTV_DEBUG(0x02, ase_debug_context),
 	UTIL_LTV_DEBUG(0x03, ase_debug_program_info),
@@ -994,7 +996,7 @@ done:
 		print_hex_field("    Data", frame.data, frame.size);
 }
 
-struct util_ltv_debugger pac_cap_table[] = {
+static const struct util_ltv_debugger pac_cap_table[] = {
 	UTIL_LTV_DEBUG(0x01, pac_decode_freq),
 	UTIL_LTV_DEBUG(0x02, pac_decode_duration),
 	UTIL_LTV_DEBUG(0x03, pac_decode_channels),
@@ -1336,7 +1338,7 @@ done:
 		print_hex_field("    Data", frame.data, frame.size);
 }
 
-struct util_ltv_debugger ase_cc_table[] = {
+static const struct util_ltv_debugger ase_cc_table[] = {
 	UTIL_LTV_DEBUG(0x01, ase_debug_freq),
 	UTIL_LTV_DEBUG(0x02, ase_debug_duration),
 	UTIL_LTV_DEBUG(0x03, ase_debug_location),
@@ -1710,7 +1712,7 @@ static bool ase_release_cmd(const struct l2cap_frame *frame)
 	.func = _func, \
 }
 
-struct ase_cmd {
+static const struct ase_cmd {
 	const char *desc;
 	bool (*func)(const struct l2cap_frame *frame);
 } ase_cmd_table[] = {
@@ -1732,7 +1734,7 @@ struct ase_cmd {
 	ASE_CMD(0x08, "Release", ase_release_cmd),
 };
 
-static struct ase_cmd *ase_get_cmd(uint8_t op)
+static const struct ase_cmd *ase_get_cmd(uint8_t op)
 {
 	if (op > ARRAY_SIZE(ase_cmd_table))
 		return NULL;
@@ -1743,7 +1745,7 @@ static struct ase_cmd *ase_get_cmd(uint8_t op)
 static void print_ase_cmd(const struct l2cap_frame *frame)
 {
 	uint8_t op, num, i;
-	struct ase_cmd *cmd;
+	const struct ase_cmd *cmd;
 
 	if (!l2cap_frame_get_u8((void *)frame, &op)) {
 		print_text(COLOR_ERROR, "opcode: invalid size");
@@ -1911,7 +1913,7 @@ static bool print_ase_cp_rsp_reason(const struct l2cap_frame *frame)
 static void print_ase_cp_rsp(const struct l2cap_frame *frame)
 {
 	uint8_t op, num, i;
-	struct ase_cmd *cmd;
+	const struct ase_cmd *cmd;
 
 	if (!l2cap_frame_get_u8((void *)frame, &op)) {
 		print_text(COLOR_ERROR, "    opcode: invalid size");
@@ -2161,7 +2163,7 @@ static bool vcs_absolute_cmd(const struct l2cap_frame *frame)
 	.func = _func, \
 }
 
-struct vcs_cmd {
+static const struct vcs_cmd {
 	const char *desc;
 	bool (*func)(const struct l2cap_frame *frame);
 } vcs_cmd_table[] = {
@@ -2181,7 +2183,7 @@ struct vcs_cmd {
 	VCS_CMD(0x06, "Mute", vcs_config_cmd),
 };
 
-static struct vcs_cmd *vcs_get_cmd(uint8_t op)
+static const struct vcs_cmd *vcs_get_cmd(uint8_t op)
 {
 	if (op > ARRAY_SIZE(vcs_cmd_table))
 		return NULL;
@@ -2192,7 +2194,7 @@ static struct vcs_cmd *vcs_get_cmd(uint8_t op)
 static void print_vcs_cmd(const struct l2cap_frame *frame)
 {
 	uint8_t op;
-	struct vcs_cmd *cmd;
+	const struct vcs_cmd *cmd;
 
 	if (!l2cap_frame_get_u8((void *)frame, &op)) {
 		print_text(COLOR_ERROR, "opcode: invalid size");
@@ -2581,7 +2583,7 @@ static void media_state_notify(const struct l2cap_frame *frame)
 	print_media_state(frame);
 }
 
-struct media_cp_opcode {
+static const struct media_cp_opcode {
 	uint8_t opcode;
 	const char *opcode_str;
 } media_cp_opcode_table[] = {
@@ -2739,7 +2741,7 @@ static void content_control_id_read(const struct l2cap_frame *frame)
 
 static const struct pa_sync_state_decoder {
 	uint8_t code;
-	char *value;
+	const char *value;
 } pa_sync_state_decoders[] = {
 	{ 0x00, "Not synchronized to PA" },
 	{ 0x01, "SyncInfo Request" },
@@ -2750,7 +2752,7 @@ static const struct pa_sync_state_decoder {
 
 static const struct cp_pa_sync_state_decoder {
 	uint8_t code;
-	char *value;
+	const char *value;
 } cp_pa_sync_state_decoders[] = {
 	{ 0x00, "Do not synchronize to PA" },
 	{ 0x01, "Synchronize to PA - PAST available" },
@@ -2759,7 +2761,7 @@ static const struct cp_pa_sync_state_decoder {
 
 static const struct big_enc_decoder {
 	uint8_t code;
-	char *value;
+	const char *value;
 } big_enc_decoders[] = {
 	{ 0x00, "Not encrypted" },
 	{ 0x01, "Broadcast_Code required" },
@@ -2769,7 +2771,7 @@ static const struct big_enc_decoder {
 
 static bool print_subgroup_lv(const struct l2cap_frame *frame,
 				const char *label,
-				struct util_ltv_debugger *debugger,
+				const struct util_ltv_debugger *debugger,
 				size_t debugger_len)
 {
 	struct bt_hci_lv_data *lv;
@@ -3135,7 +3137,7 @@ static void bcast_audio_scan_cp_remove_src_cmd(const struct l2cap_frame *frame)
 	print_field("    Source_ID: %u", id);
 }
 
-struct bcast_audio_scan_cp_cmd {
+static const struct bcast_audio_scan_cp_cmd {
 	const char *desc;
 	void (*func)(const struct l2cap_frame *frame);
 } bcast_audio_scan_cp_cmd_table[] = {
@@ -3157,7 +3159,8 @@ struct bcast_audio_scan_cp_cmd {
 					bcast_audio_scan_cp_remove_src_cmd),
 };
 
-static struct bcast_audio_scan_cp_cmd *bcast_audio_scan_cp_get_cmd(uint8_t op)
+static const struct bcast_audio_scan_cp_cmd *
+bcast_audio_scan_cp_get_cmd(uint8_t op)
 {
 	if (op > ARRAY_SIZE(bcast_audio_scan_cp_cmd_table))
 		return NULL;
@@ -3168,7 +3171,7 @@ static struct bcast_audio_scan_cp_cmd *bcast_audio_scan_cp_get_cmd(uint8_t op)
 static void print_bcast_audio_scan_cp_cmd(const struct l2cap_frame *frame)
 {
 	uint8_t op;
-	struct bcast_audio_scan_cp_cmd *cmd;
+	const struct bcast_audio_scan_cp_cmd *cmd;
 
 	if (!l2cap_frame_get_u8((void *)frame, &op)) {
 		print_text(COLOR_ERROR, "Opcode: invalid size");
@@ -3340,7 +3343,7 @@ static void bgr_features_read(const struct l2cap_frame *frame)
 	.notify = _notify \
 }
 
-struct gatt_handler {
+static const struct gatt_handler {
 	bt_uuid_t uuid;
 	void (*read)(const struct l2cap_frame *frame);
 	void (*write)(const struct l2cap_frame *frame);
@@ -3392,7 +3395,7 @@ struct gatt_handler {
 	GMAS
 };
 
-static struct gatt_handler *get_handler_uuid(const bt_uuid_t *uuid)
+static const struct gatt_handler *get_handler_uuid(const bt_uuid_t *uuid)
 {
 	size_t i;
 
@@ -3400,7 +3403,7 @@ static struct gatt_handler *get_handler_uuid(const bt_uuid_t *uuid)
 		return NULL;
 
 	for (i = 0; i < ARRAY_SIZE(gatt_handlers); i++) {
-		struct gatt_handler *handler = &gatt_handlers[i];
+		const struct gatt_handler *handler = &gatt_handlers[i];
 
 		if (!bt_uuid_cmp(&handler->uuid, uuid))
 			return handler;
@@ -3409,7 +3412,7 @@ static struct gatt_handler *get_handler_uuid(const bt_uuid_t *uuid)
 	return NULL;
 }
 
-static struct gatt_handler *get_handler(struct gatt_db_attribute *attr)
+static const struct gatt_handler *get_handler(struct gatt_db_attribute *attr)
 {
 	return get_handler_uuid(gatt_db_attribute_get_type(attr));
 }
@@ -3580,7 +3583,7 @@ static void queue_read(const struct l2cap_frame *frame, bt_uuid_t *uuid,
 	struct att_conn_data *data;
 	struct att_read *read;
 	struct gatt_db_attribute *attr = NULL;
-	struct gatt_handler *handler;
+	const struct gatt_handler *handler;
 
 	if (handle) {
 		attr = get_attribute(frame, handle, false);
@@ -3761,7 +3764,7 @@ static void print_write(const struct l2cap_frame *frame, uint16_t handle,
 							size_t len)
 {
 	struct gatt_db_attribute *attr;
-	struct gatt_handler *handler;
+	const struct gatt_handler *handler;
 
 	print_handle(frame, handle, false);
 
@@ -3837,7 +3840,7 @@ static void print_notify(const struct l2cap_frame *frame, uint16_t handle,
 								size_t len)
 {
 	struct gatt_db_attribute *attr;
-	struct gatt_handler *handler;
+	const struct gatt_handler *handler;
 	struct l2cap_frame clone;
 
 	print_handle(frame, handle, true);

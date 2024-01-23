@@ -64,13 +64,35 @@
 #define SEC_USEC(_t)  (_t  * 1000000L)
 #define TS_USEC(_ts)  (SEC_USEC((_ts)->tv_sec) + NSEC_USEC((_ts)->tv_nsec))
 
-#define EP_SRC_LOCATIONS 0x00000001
+#define EP_SRC_LOCATIONS 0x00000003
 #define EP_SNK_LOCATIONS 0x00000003
 
 #define EP_SRC_CTXT 0x000f
 #define EP_SUPPORTED_SRC_CTXT EP_SRC_CTXT
 #define EP_SNK_CTXT 0x0fff
 #define EP_SUPPORTED_SNK_CTXT EP_SNK_CTXT
+
+#if __BYTE_ORDER == __LITTLE_ENDIAN
+
+struct avdtp_media_codec_capability {
+	uint8_t rfa0:4;
+	uint8_t media_type:4;
+	uint8_t media_codec_type;
+	uint8_t data[0];
+} __attribute__ ((packed));
+
+#elif __BYTE_ORDER == __BIG_ENDIAN
+
+struct avdtp_media_codec_capability {
+	uint8_t media_type:4;
+	uint8_t rfa0:4;
+	uint8_t media_codec_type;
+	uint8_t data[0];
+} __attribute__ ((packed));
+
+#else
+#error "Unknown byte order"
+#endif
 
 struct endpoint {
 	char *path;
@@ -1860,7 +1882,7 @@ struct endpoint_config {
 	struct iovec *caps;
 	struct iovec *meta;
 	uint8_t target_latency;
-	const struct codec_qos *qos;
+	struct codec_qos qos;
 };
 
 #define BCODE {0x01, 0x02, 0x68, 0x05, 0x53, 0xf1, 0x41, 0x5a, \
@@ -1886,7 +1908,7 @@ static struct bt_iso_qos bcast_qos = {
 
 static void append_io_qos(DBusMessageIter *iter, struct endpoint_config *cfg)
 {
-	struct codec_qos *qos = (void *)cfg->qos;
+	struct codec_qos *qos = &cfg->qos;
 
 	bt_shell_printf("Interval %u\n", qos->interval);
 
@@ -1897,7 +1919,7 @@ static void append_io_qos(DBusMessageIter *iter, struct endpoint_config *cfg)
 
 	g_dbus_dict_append_entry(iter, "PHY", DBUS_TYPE_BYTE, &qos->phy);
 
-	bt_shell_printf("SDU %u\n", cfg->qos->sdu);
+	bt_shell_printf("SDU %u\n", qos->sdu);
 
 	g_dbus_dict_append_entry(iter, "SDU", DBUS_TYPE_UINT16, &qos->sdu);
 
@@ -1914,7 +1936,7 @@ static void append_io_qos(DBusMessageIter *iter, struct endpoint_config *cfg)
 
 static void append_ucast_qos(DBusMessageIter *iter, struct endpoint_config *cfg)
 {
-	struct codec_qos *qos = (void *)cfg->qos;
+	struct codec_qos *qos = &cfg->qos;
 
 	if (cfg->ep->iso_group != BT_ISO_QOS_GROUP_UNSET) {
 		bt_shell_printf("CIG 0x%2.2x\n", cfg->ep->iso_group);
@@ -2020,7 +2042,7 @@ static void append_bcast_qos(DBusMessageIter *iter, struct endpoint_config *cfg)
 static void append_qos(DBusMessageIter *iter, struct endpoint_config *cfg)
 {
 	DBusMessageIter entry, var, dict;
-	struct codec_qos *qos = (void *)cfg->qos;
+	struct codec_qos *qos = &cfg->qos;
 	const char *key = "QoS";
 
 	if (!qos)
@@ -2104,13 +2126,46 @@ static struct iovec *iov_append(struct iovec **iov, const void *data,
 	return *iov;
 }
 
+static int parse_chan_alloc(DBusMessageIter *iter, uint32_t *location,
+						uint8_t *channels)
+{
+	while (dbus_message_iter_get_arg_type(iter) == DBUS_TYPE_DICT_ENTRY) {
+		const char *key;
+		DBusMessageIter value, entry;
+		int var;
+
+		dbus_message_iter_recurse(iter, &entry);
+		dbus_message_iter_get_basic(&entry, &key);
+
+		dbus_message_iter_next(&entry);
+		dbus_message_iter_recurse(&entry, &value);
+
+		var = dbus_message_iter_get_arg_type(&value);
+
+		if (!strcasecmp(key, "ChannelAllocation")) {
+			if (var != DBUS_TYPE_UINT32)
+				return -EINVAL;
+			dbus_message_iter_get_basic(&value, location);
+			if (*channels)
+				*channels = __builtin_popcount(*location);
+			return 0;
+		}
+
+		dbus_message_iter_next(iter);
+	}
+
+	return -EINVAL;
+}
+
 static DBusMessage *endpoint_select_properties_reply(struct endpoint *ep,
 						DBusMessage *msg,
 						struct codec_preset *preset)
 {
 	DBusMessage *reply;
-	DBusMessageIter iter;
+	DBusMessageIter iter, props;
 	struct endpoint_config *cfg;
+	uint32_t location = 0;
+	uint8_t channels = 1;
 
 	if (!preset)
 		return NULL;
@@ -2126,13 +2181,31 @@ static DBusMessage *endpoint_select_properties_reply(struct endpoint *ep,
 	iov_append(&cfg->caps, preset->data.iov_base, preset->data.iov_len);
 	cfg->target_latency = preset->target_latency;
 
+	dbus_message_iter_init(msg, &iter);
+	dbus_message_iter_recurse(&iter, &props);
+
+	if (!parse_chan_alloc(&props, &location, &channels)) {
+		uint8_t chan_alloc_ltv[] = {
+			0x05, LC3_CONFIG_CHAN_ALLOC, location & 0xff,
+			location >> 8, location >> 16, location >> 24
+		};
+
+		iov_append(&cfg->caps, &chan_alloc_ltv, sizeof(chan_alloc_ltv));
+	}
+
 	/* Copy metadata */
 	if (ep->meta)
 		iov_append(&cfg->meta, ep->meta->iov_base, ep->meta->iov_len);
 
-	if (preset->qos.phy)
+	if (preset->qos.phy) {
 		/* Set QoS parameters */
-		cfg->qos = &preset->qos;
+		cfg->qos = preset->qos;
+		/* Adjust the SDU size based on the number of
+		 * locations/channels that is being requested.
+		 */
+		if (channels > 1)
+			cfg->qos.sdu *= channels;
+	}
 
 	dbus_message_iter_init_append(reply, &iter);
 
@@ -2247,22 +2320,505 @@ static struct endpoint *endpoint_find(const char *pattern)
 	return NULL;
 }
 
+static void print_aptx_common(a2dp_aptx_t *aptx)
+{
+	bt_shell_printf("\n\t\tFrequencies: ");
+	if (aptx->frequency & APTX_SAMPLING_FREQ_16000)
+		bt_shell_printf("16kHz ");
+	if (aptx->frequency & APTX_SAMPLING_FREQ_32000)
+		bt_shell_printf("32kHz ");
+	if (aptx->frequency & APTX_SAMPLING_FREQ_44100)
+		bt_shell_printf("44.1kHz ");
+	if (aptx->frequency & APTX_SAMPLING_FREQ_48000)
+		bt_shell_printf("48kHz ");
+
+	bt_shell_printf("\n\t\tChannel modes: ");
+	if (aptx->channel_mode & APTX_CHANNEL_MODE_MONO)
+		bt_shell_printf("Mono ");
+	if (aptx->channel_mode & APTX_CHANNEL_MODE_STEREO)
+		bt_shell_printf("Stereo ");
+}
+
+static void print_aptx(a2dp_aptx_t *aptx, uint8_t size)
+{
+	bt_shell_printf("\t\tVendor Specific Value (aptX)");
+
+	if (size < sizeof(*aptx)) {
+		bt_shell_printf(" (broken)\n");
+		return;
+	}
+
+	print_aptx_common(aptx);
+
+	bt_shell_printf("\n");
+}
+
+static void print_faststream(a2dp_faststream_t *faststream, uint8_t size)
+{
+	bt_shell_printf("\t\tVendor Specific Value (FastStream)");
+
+	if (size < sizeof(*faststream)) {
+		bt_shell_printf(" (broken)\n");
+		return;
+	}
+
+	bt_shell_printf("\n\t\tDirections: ");
+	if (faststream->direction & FASTSTREAM_DIRECTION_SINK)
+		bt_shell_printf("sink ");
+	if (faststream->direction & FASTSTREAM_DIRECTION_SOURCE)
+		bt_shell_printf("source ");
+
+	if (faststream->direction & FASTSTREAM_DIRECTION_SINK) {
+		bt_shell_printf("\n\t\tSink Frequencies: ");
+		if (faststream->sink_frequency &
+				FASTSTREAM_SINK_SAMPLING_FREQ_44100)
+			bt_shell_printf("44.1kHz ");
+		if (faststream->sink_frequency &
+				FASTSTREAM_SINK_SAMPLING_FREQ_48000)
+			bt_shell_printf("48kHz ");
+	}
+
+	if (faststream->direction & FASTSTREAM_DIRECTION_SOURCE) {
+		bt_shell_printf("\n\t\tSource Frequencies: ");
+		if (faststream->source_frequency &
+				FASTSTREAM_SOURCE_SAMPLING_FREQ_16000)
+			bt_shell_printf("16kHz ");
+	}
+
+	bt_shell_printf("\n");
+}
+
+static void print_aptx_ll(a2dp_aptx_ll_t *aptx_ll, uint8_t size)
+{
+	a2dp_aptx_ll_new_caps_t *aptx_ll_new;
+
+	bt_shell_printf("\t\tVendor Specific Value (aptX Low Latency)");
+
+	if (size < sizeof(*aptx_ll)) {
+		bt_shell_printf(" (broken)\n");
+		return;
+	}
+
+	print_aptx_common(&aptx_ll->aptx);
+
+	bt_shell_printf("\n\tBidirectional link: %s",
+			aptx_ll->bidirect_link ? "Yes" : "No");
+
+	aptx_ll_new = &aptx_ll->new_caps[0];
+	if (aptx_ll->has_new_caps &&
+	    size >= sizeof(*aptx_ll) + sizeof(*aptx_ll_new)) {
+		bt_shell_printf("\n\tTarget codec buffer level: %u",
+			(unsigned int)aptx_ll_new->target_level2 |
+			((unsigned int)(aptx_ll_new->target_level1) << 8));
+		bt_shell_printf("\n\tInitial codec buffer level: %u",
+			(unsigned int)aptx_ll_new->initial_level2 |
+			((unsigned int)(aptx_ll_new->initial_level1) << 8));
+		bt_shell_printf("\n\tSRA max rate: %g",
+			aptx_ll_new->sra_max_rate / 10000.0);
+		bt_shell_printf("\n\tSRA averaging time: %us",
+			(unsigned int)aptx_ll_new->sra_avg_time);
+		bt_shell_printf("\n\tGood working codec buffer level: %u",
+			(unsigned int)aptx_ll_new->good_working_level2 |
+			((unsigned int)(aptx_ll_new->good_working_level1) << 8)
+			);
+	}
+
+	bt_shell_printf("\n");
+}
+
+static void print_aptx_hd(a2dp_aptx_hd_t *aptx_hd, uint8_t size)
+{
+	bt_shell_printf("\t\tVendor Specific Value (aptX HD)");
+
+	if (size < sizeof(*aptx_hd)) {
+		bt_shell_printf(" (broken)\n");
+		return;
+	}
+
+	print_aptx_common(&aptx_hd->aptx);
+
+	bt_shell_printf("\n");
+}
+
+static void print_ldac(a2dp_ldac_t *ldac, uint8_t size)
+{
+	bt_shell_printf("\t\tVendor Specific Value (LDAC)");
+
+	if (size < sizeof(*ldac)) {
+		bt_shell_printf(" (broken)\n");
+		return;
+	}
+
+	bt_shell_printf("\n\t\tFrequencies: ");
+	if (ldac->frequency & LDAC_SAMPLING_FREQ_44100)
+		bt_shell_printf("44.1kHz ");
+	if (ldac->frequency & LDAC_SAMPLING_FREQ_48000)
+		bt_shell_printf("48kHz ");
+	if (ldac->frequency & LDAC_SAMPLING_FREQ_88200)
+		bt_shell_printf("88.2kHz ");
+	if (ldac->frequency & LDAC_SAMPLING_FREQ_96000)
+		bt_shell_printf("96kHz ");
+	if (ldac->frequency & LDAC_SAMPLING_FREQ_176400)
+		bt_shell_printf("176.4kHz ");
+	if (ldac->frequency & LDAC_SAMPLING_FREQ_192000)
+		bt_shell_printf("192kHz ");
+
+	bt_shell_printf("\n\t\tChannel modes: ");
+	if (ldac->channel_mode & LDAC_CHANNEL_MODE_MONO)
+		bt_shell_printf("Mono ");
+	if (ldac->channel_mode & LDAC_CHANNEL_MODE_DUAL)
+		bt_shell_printf("Dual ");
+	if (ldac->channel_mode & LDAC_CHANNEL_MODE_STEREO)
+		bt_shell_printf("Stereo ");
+
+	bt_shell_printf("\n");
+}
+
+static void print_vendor(a2dp_vendor_codec_t *vendor, uint8_t size)
+{
+	uint32_t vendor_id;
+	uint16_t codec_id;
+	int i;
+
+	if (size < sizeof(*vendor)) {
+		bt_shell_printf("\tMedia Codec: Vendor Specific A2DP Codec "
+				"(broken)");
+		return;
+	}
+
+	vendor_id = A2DP_GET_VENDOR_ID(*vendor);
+	codec_id = A2DP_GET_CODEC_ID(*vendor);
+
+	bt_shell_printf("\tMedia Codec: Vendor Specific A2DP Codec");
+
+	bt_shell_printf("\n\tVendor ID 0x%08x", vendor_id);
+
+	bt_shell_printf("\n\tVendor Specific Codec ID 0x%04x", codec_id);
+
+	bt_shell_printf("\n\tVendor Specific Data:");
+	for (i = 6; i < size; ++i)
+		bt_shell_printf(" 0x%.02x", ((unsigned char *)vendor)[i]);
+	bt_shell_printf("\n");
+
+	if (vendor_id == APTX_VENDOR_ID && codec_id == APTX_CODEC_ID)
+		print_aptx((void *) vendor, size);
+	else if (vendor_id == FASTSTREAM_VENDOR_ID &&
+			codec_id == FASTSTREAM_CODEC_ID)
+		print_faststream((void *) vendor, size);
+	else if (vendor_id == APTX_LL_VENDOR_ID && codec_id == APTX_LL_CODEC_ID)
+		print_aptx_ll((void *) vendor, size);
+	else if (vendor_id == APTX_HD_VENDOR_ID && codec_id == APTX_HD_CODEC_ID)
+		print_aptx_hd((void *) vendor, size);
+	else if (vendor_id == LDAC_VENDOR_ID && codec_id == LDAC_CODEC_ID)
+		print_ldac((void *) vendor, size);
+}
+
+static void print_mpeg24(a2dp_aac_t *aac, uint8_t size)
+{
+	unsigned int freq, bitrate;
+
+	if (size < sizeof(*aac)) {
+		bt_shell_printf("\tMedia Codec: MPEG24 (broken)\n");
+		return;
+	}
+
+	freq = AAC_GET_FREQUENCY(*aac);
+	bitrate = AAC_GET_BITRATE(*aac);
+
+	bt_shell_printf("\tMedia Codec: MPEG24\n\tObject Types: ");
+
+	if (aac->object_type & AAC_OBJECT_TYPE_MPEG2_AAC_LC)
+		bt_shell_printf("MPEG-2 AAC LC ");
+	if (aac->object_type & AAC_OBJECT_TYPE_MPEG4_AAC_LC)
+		bt_shell_printf("MPEG-4 AAC LC ");
+	if (aac->object_type & AAC_OBJECT_TYPE_MPEG4_AAC_LTP)
+		bt_shell_printf("MPEG-4 AAC LTP ");
+	if (aac->object_type & AAC_OBJECT_TYPE_MPEG4_AAC_SCA)
+		bt_shell_printf("MPEG-4 AAC scalable ");
+
+	bt_shell_printf("\n\tFrequencies: ");
+	if (freq & AAC_SAMPLING_FREQ_8000)
+		bt_shell_printf("8kHz ");
+	if (freq & AAC_SAMPLING_FREQ_11025)
+		bt_shell_printf("11.025kHz ");
+	if (freq & AAC_SAMPLING_FREQ_12000)
+		bt_shell_printf("12kHz ");
+	if (freq & AAC_SAMPLING_FREQ_16000)
+		bt_shell_printf("16kHz ");
+	if (freq & AAC_SAMPLING_FREQ_22050)
+		bt_shell_printf("22.05kHz ");
+	if (freq & AAC_SAMPLING_FREQ_24000)
+		bt_shell_printf("24kHz ");
+	if (freq & AAC_SAMPLING_FREQ_32000)
+		bt_shell_printf("32kHz ");
+	if (freq & AAC_SAMPLING_FREQ_44100)
+		bt_shell_printf("44.1kHz ");
+	if (freq & AAC_SAMPLING_FREQ_48000)
+		bt_shell_printf("48kHz ");
+	if (freq & AAC_SAMPLING_FREQ_64000)
+		bt_shell_printf("64kHz ");
+	if (freq & AAC_SAMPLING_FREQ_88200)
+		bt_shell_printf("88.2kHz ");
+	if (freq & AAC_SAMPLING_FREQ_96000)
+		bt_shell_printf("96kHz ");
+
+	bt_shell_printf("\n\tChannels: ");
+	if (aac->channels & AAC_CHANNELS_1)
+		bt_shell_printf("1 ");
+	if (aac->channels & AAC_CHANNELS_2)
+		bt_shell_printf("2 ");
+
+	bt_shell_printf("\n\tBitrate: %u", bitrate);
+
+	bt_shell_printf("\n\tVBR: %s", aac->vbr ? "Yes\n" : "No\n");
+}
+
+static void print_mpeg12(a2dp_mpeg_t *mpeg, uint8_t size)
+{
+	uint16_t bitrate;
+
+	if (size < sizeof(*mpeg)) {
+		bt_shell_printf("\tMedia Codec: MPEG12 (broken)\n");
+		return;
+	}
+
+	bitrate = MPEG_GET_BITRATE(*mpeg);
+
+	bt_shell_printf("\tMedia Codec: MPEG12\n\tChannel Modes: ");
+
+	if (mpeg->channel_mode & MPEG_CHANNEL_MODE_MONO)
+		bt_shell_printf("Mono ");
+	if (mpeg->channel_mode & MPEG_CHANNEL_MODE_DUAL_CHANNEL)
+		bt_shell_printf("DualChannel ");
+	if (mpeg->channel_mode & MPEG_CHANNEL_MODE_STEREO)
+		bt_shell_printf("Stereo ");
+	if (mpeg->channel_mode & MPEG_CHANNEL_MODE_JOINT_STEREO)
+		bt_shell_printf("JointStereo");
+
+	bt_shell_printf("\n\tFrequencies: ");
+	if (mpeg->frequency & MPEG_SAMPLING_FREQ_16000)
+		bt_shell_printf("16Khz ");
+	if (mpeg->frequency & MPEG_SAMPLING_FREQ_22050)
+		bt_shell_printf("22.05Khz ");
+	if (mpeg->frequency & MPEG_SAMPLING_FREQ_24000)
+		bt_shell_printf("24Khz ");
+	if (mpeg->frequency & MPEG_SAMPLING_FREQ_32000)
+		bt_shell_printf("32Khz ");
+	if (mpeg->frequency & MPEG_SAMPLING_FREQ_44100)
+		bt_shell_printf("44.1Khz ");
+	if (mpeg->frequency & MPEG_SAMPLING_FREQ_48000)
+		bt_shell_printf("48Khz ");
+
+	bt_shell_printf("\n\tCRC: %s", mpeg->crc ? "Yes" : "No");
+
+	bt_shell_printf("\n\tLayer: ");
+	if (mpeg->layer & MPEG_LAYER_MP1)
+		bt_shell_printf("1 ");
+	if (mpeg->layer & MPEG_LAYER_MP2)
+		bt_shell_printf("2 ");
+	if (mpeg->layer & MPEG_LAYER_MP3)
+		bt_shell_printf("3 ");
+
+	if (bitrate & MPEG_BIT_RATE_FREE) {
+		bt_shell_printf("\n\tBit Rate: Free format");
+	} else {
+		if (mpeg->layer & MPEG_LAYER_MP1) {
+			bt_shell_printf("\n\tLayer 1 Bit Rate: ");
+			if (bitrate & MPEG_MP1_BIT_RATE_32000)
+				bt_shell_printf("32kbps ");
+			if (bitrate & MPEG_MP1_BIT_RATE_64000)
+				bt_shell_printf("64kbps ");
+			if (bitrate & MPEG_MP1_BIT_RATE_96000)
+				bt_shell_printf("96kbps ");
+			if (bitrate & MPEG_MP1_BIT_RATE_128000)
+				bt_shell_printf("128kbps ");
+			if (bitrate & MPEG_MP1_BIT_RATE_160000)
+				bt_shell_printf("160kbps ");
+			if (bitrate & MPEG_MP1_BIT_RATE_192000)
+				bt_shell_printf("192kbps ");
+			if (bitrate & MPEG_MP1_BIT_RATE_224000)
+				bt_shell_printf("224kbps ");
+			if (bitrate & MPEG_MP1_BIT_RATE_256000)
+				bt_shell_printf("256kbps ");
+			if (bitrate & MPEG_MP1_BIT_RATE_320000)
+				bt_shell_printf("320kbps ");
+			if (bitrate & MPEG_MP1_BIT_RATE_352000)
+				bt_shell_printf("352kbps ");
+			if (bitrate & MPEG_MP1_BIT_RATE_384000)
+				bt_shell_printf("384kbps ");
+			if (bitrate & MPEG_MP1_BIT_RATE_416000)
+				bt_shell_printf("416kbps ");
+			if (bitrate & MPEG_MP1_BIT_RATE_448000)
+				bt_shell_printf("448kbps ");
+		}
+
+		if (mpeg->layer & MPEG_LAYER_MP2) {
+			bt_shell_printf("\n\tLayer 2 Bit Rate: ");
+			if (bitrate & MPEG_MP2_BIT_RATE_32000)
+				bt_shell_printf("32kbps ");
+			if (bitrate & MPEG_MP2_BIT_RATE_48000)
+				bt_shell_printf("48kbps ");
+			if (bitrate & MPEG_MP2_BIT_RATE_56000)
+				bt_shell_printf("56kbps ");
+			if (bitrate & MPEG_MP2_BIT_RATE_64000)
+				bt_shell_printf("64kbps ");
+			if (bitrate & MPEG_MP2_BIT_RATE_80000)
+				bt_shell_printf("80kbps ");
+			if (bitrate & MPEG_MP2_BIT_RATE_96000)
+				bt_shell_printf("96kbps ");
+			if (bitrate & MPEG_MP2_BIT_RATE_112000)
+				bt_shell_printf("112kbps ");
+			if (bitrate & MPEG_MP2_BIT_RATE_128000)
+				bt_shell_printf("128kbps ");
+			if (bitrate & MPEG_MP2_BIT_RATE_160000)
+				bt_shell_printf("160kbps ");
+			if (bitrate & MPEG_MP2_BIT_RATE_192000)
+				bt_shell_printf("192kbps ");
+			if (bitrate & MPEG_MP2_BIT_RATE_224000)
+				bt_shell_printf("224kbps ");
+			if (bitrate & MPEG_MP2_BIT_RATE_256000)
+				bt_shell_printf("256kbps ");
+			if (bitrate & MPEG_MP2_BIT_RATE_320000)
+				bt_shell_printf("320kbps ");
+			if (bitrate & MPEG_MP2_BIT_RATE_384000)
+				bt_shell_printf("384kbps ");
+		}
+
+		if (mpeg->layer & MPEG_LAYER_MP3) {
+			bt_shell_printf("\n\tLayer 3 Bit Rate: ");
+			if (bitrate & MPEG_MP3_BIT_RATE_32000)
+				bt_shell_printf("32kbps ");
+			if (bitrate & MPEG_MP3_BIT_RATE_40000)
+				bt_shell_printf("40kbps ");
+			if (bitrate & MPEG_MP3_BIT_RATE_48000)
+				bt_shell_printf("48kbps ");
+			if (bitrate & MPEG_MP3_BIT_RATE_56000)
+				bt_shell_printf("56kbps ");
+			if (bitrate & MPEG_MP3_BIT_RATE_64000)
+				bt_shell_printf("64kbps ");
+			if (bitrate & MPEG_MP3_BIT_RATE_80000)
+				bt_shell_printf("80kbps ");
+			if (bitrate & MPEG_MP3_BIT_RATE_96000)
+				bt_shell_printf("96kbps ");
+			if (bitrate & MPEG_MP3_BIT_RATE_112000)
+				bt_shell_printf("112kbps ");
+			if (bitrate & MPEG_MP3_BIT_RATE_128000)
+				bt_shell_printf("128kbps ");
+			if (bitrate & MPEG_MP3_BIT_RATE_160000)
+				bt_shell_printf("160kbps ");
+			if (bitrate & MPEG_MP3_BIT_RATE_192000)
+				bt_shell_printf("192kbps ");
+			if (bitrate & MPEG_MP3_BIT_RATE_224000)
+				bt_shell_printf("224kbps ");
+			if (bitrate & MPEG_MP3_BIT_RATE_256000)
+				bt_shell_printf("256kbps ");
+			if (bitrate & MPEG_MP3_BIT_RATE_320000)
+				bt_shell_printf("320kbps ");
+		}
+	}
+
+	bt_shell_printf("\n\tVBR: %s", mpeg->vbr ? "Yes" : "No");
+
+	bt_shell_printf("\n\tPayload Format: ");
+	if (mpeg->mpf)
+		bt_shell_printf("RFC-2250 RFC-3119\n");
+	else
+		bt_shell_printf("RFC-2250\n");
+}
+
+static void print_sbc(a2dp_sbc_t *sbc, uint8_t size)
+{
+	if (size < sizeof(*sbc)) {
+		bt_shell_printf("\tMedia Codec: SBC (broken)\n");
+		return;
+	}
+
+	bt_shell_printf("\tMedia Codec: SBC\n\tChannel Modes: ");
+
+	if (sbc->channel_mode & SBC_CHANNEL_MODE_MONO)
+		bt_shell_printf("Mono ");
+	if (sbc->channel_mode & SBC_CHANNEL_MODE_DUAL_CHANNEL)
+		bt_shell_printf("DualChannel ");
+	if (sbc->channel_mode & SBC_CHANNEL_MODE_STEREO)
+		bt_shell_printf("Stereo ");
+	if (sbc->channel_mode & SBC_CHANNEL_MODE_JOINT_STEREO)
+		bt_shell_printf("JointStereo");
+
+	bt_shell_printf("\n\tFrequencies: ");
+	if (sbc->frequency & SBC_SAMPLING_FREQ_16000)
+		bt_shell_printf("16Khz ");
+	if (sbc->frequency & SBC_SAMPLING_FREQ_32000)
+		bt_shell_printf("32Khz ");
+	if (sbc->frequency & SBC_SAMPLING_FREQ_44100)
+		bt_shell_printf("44.1Khz ");
+	if (sbc->frequency & SBC_SAMPLING_FREQ_48000)
+		bt_shell_printf("48Khz ");
+
+	bt_shell_printf("\n\tSubbands: ");
+	if (sbc->allocation_method & SBC_SUBBANDS_4)
+		bt_shell_printf("4 ");
+	if (sbc->allocation_method & SBC_SUBBANDS_8)
+		bt_shell_printf("8");
+
+	bt_shell_printf("\n\tBlocks: ");
+	if (sbc->block_length & SBC_BLOCK_LENGTH_4)
+		bt_shell_printf("4 ");
+	if (sbc->block_length & SBC_BLOCK_LENGTH_8)
+		bt_shell_printf("8 ");
+	if (sbc->block_length & SBC_BLOCK_LENGTH_12)
+		bt_shell_printf("12 ");
+	if (sbc->block_length & SBC_BLOCK_LENGTH_16)
+		bt_shell_printf("16 ");
+
+	bt_shell_printf("\n\tBitpool Range: %d-%d\n",
+				sbc->min_bitpool, sbc->max_bitpool);
+}
+
+static int print_a2dp_codec(uint8_t codec, void *data, uint8_t size)
+{
+	int i;
+
+	switch (codec) {
+	case A2DP_CODEC_SBC:
+		print_sbc(data, size);
+		break;
+	case A2DP_CODEC_MPEG12:
+		print_mpeg12(data, size);
+		break;
+	case A2DP_CODEC_MPEG24:
+		print_mpeg24(data, size);
+		break;
+	case A2DP_CODEC_VENDOR:
+		print_vendor(data, size);
+		break;
+	default:
+		bt_shell_printf("\tMedia Codec: Unknown\n");
+		bt_shell_printf("\t\tCodec Data:");
+		for (i = 0; i < size - 2; ++i)
+			bt_shell_printf(" 0x%.02x", ((unsigned char *)data)[i]);
+		bt_shell_printf("\n");
+	}
+
+	return 0;
+}
+
 static void print_capabilities(GDBusProxy *proxy)
 {
 	DBusMessageIter iter, subiter;
+	const char *uuid;
 	uint8_t codec;
 	uint8_t *data;
 	int len;
+
+	if (!g_dbus_proxy_get_property(proxy, "UUID", &iter))
+		return;
+
+	dbus_message_iter_get_basic(&iter, &uuid);
 
 	if (!g_dbus_proxy_get_property(proxy, "Codec", &iter))
 		return;
 
 	dbus_message_iter_get_basic(&iter, &codec);
-
-	if (codec != LC3_ID) {
-		print_property(proxy, "Capabilities");
-		return;
-	}
 
 	if (!g_dbus_proxy_get_property(proxy, "Capabilities", &iter))
 		return;
@@ -2270,6 +2826,17 @@ static void print_capabilities(GDBusProxy *proxy)
 	dbus_message_iter_recurse(&iter, &subiter);
 
 	dbus_message_iter_get_fixed_array(&subiter, &data, &len);
+
+	if (!strcasecmp(uuid, A2DP_SINK_UUID) ||
+			!strcasecmp(uuid, A2DP_SOURCE_UUID)) {
+		print_a2dp_codec(codec, data, len);
+		return;
+	}
+
+	if (codec != LC3_ID) {
+		print_property(proxy, "Capabilities");
+		return;
+	}
 
 	print_lc3_caps(data, len);
 
@@ -3075,10 +3642,6 @@ static void cmd_config_endpoint(int argc, char *argv[])
 {
 	struct endpoint_config *cfg;
 	const struct codec_preset *preset;
-	const struct capabilities *cap;
-	char *uuid;
-	uint8_t codec_id;
-	bool broadcast = false;
 
 	cfg = new0(struct endpoint_config, 1);
 
@@ -3093,33 +3656,14 @@ static void cmd_config_endpoint(int argc, char *argv[])
 	/* Search for the local endpoint */
 	cfg->ep = endpoint_find(argv[2]);
 	if (!cfg->ep) {
-
-		/* When the local endpoint was not found either we received
-		 * UUID, or the provided local endpoint is not available
-		 */
-		uuid = argv[2];
-		codec_id = strtol(argv[3], NULL, 0);
-		cap = find_capabilities(uuid, codec_id);
-		if (cap) {
-			broadcast = true;
-			cfg->ep = endpoint_new(cap);
-			cfg->ep->preset = find_presets_name(uuid, argv[3]);
-			if (!cfg->ep->preset)
-				bt_shell_printf("Preset not found\n");
-		} else {
-			bt_shell_printf("Local Endpoint %s,"
-				"or capabilities not found\n", uuid);
-			goto fail;
-		}
+		bt_shell_printf("Local Endpoint %s not found\n", argv[2]);
+		goto fail;
 	}
 
-	if (((broadcast == false) && (argc > 3)) ||
-		((broadcast == true) && (argc > 4))) {
-		char *preset_name = (broadcast == false)?argv[3]:argv[4];
-
-		preset = preset_find_name(cfg->ep->preset, preset_name);
+	if (argc > 3) {
+		preset = preset_find_name(cfg->ep->preset, argv[3]);
 		if (!preset) {
-			bt_shell_printf("Preset %s not found\n", preset_name);
+			bt_shell_printf("Preset %s not found\n", argv[3]);
 			goto fail;
 		}
 
@@ -3136,7 +3680,7 @@ static void cmd_config_endpoint(int argc, char *argv[])
 		}
 
 		/* Set QoS parameters */
-		cfg->qos = &preset->qos;
+		cfg->qos = preset->qos;
 
 		endpoint_set_config(cfg);
 		return;
@@ -3538,8 +4082,7 @@ static const struct bt_shell_menu endpoint_menu = {
 	{ "unregister",   "<UUID/object>", cmd_unregister_endpoint,
 						"Register Endpoint",
 						local_endpoint_generator },
-	{ "config",
-		"<endpoint> [local endpoint/UUID] [preset/codec id] [preset]",
+	{ "config",       "<endpoint> [local endpoint] [preset]",
 						cmd_config_endpoint,
 						"Configure Endpoint",
 						endpoint_generator },
@@ -4128,19 +4671,20 @@ static void cmd_list_transport(int argc, char *argv[])
 static void print_configuration(GDBusProxy *proxy)
 {
 	DBusMessageIter iter, subiter;
+	const char *uuid;
 	uint8_t codec;
 	uint8_t *data;
 	int len;
+
+	if (!g_dbus_proxy_get_property(proxy, "UUID", &iter))
+		return;
+
+	dbus_message_iter_get_basic(&iter, &uuid);
 
 	if (!g_dbus_proxy_get_property(proxy, "Codec", &iter))
 		return;
 
 	dbus_message_iter_get_basic(&iter, &codec);
-
-	if (codec != LC3_ID) {
-		print_property(proxy, "Configuration");
-		return;
-	}
 
 	if (!g_dbus_proxy_get_property(proxy, "Configuration", &iter))
 		return;
@@ -4148,6 +4692,17 @@ static void print_configuration(GDBusProxy *proxy)
 	dbus_message_iter_recurse(&iter, &subiter);
 
 	dbus_message_iter_get_fixed_array(&subiter, &data, &len);
+
+	if (!strcasecmp(uuid, A2DP_SINK_UUID) ||
+			!strcasecmp(uuid, A2DP_SOURCE_UUID)) {
+		print_a2dp_codec(codec, (void *)data, len);
+		return;
+	}
+
+	if (codec != LC3_ID) {
+		print_property(proxy, "Configuration");
+		return;
+	}
 
 	print_lc3_cfg(data, len);
 

@@ -231,7 +231,7 @@ static void pcsuite_disconnect(struct obex_session *os, void *user_data)
 	g_free(pcsuite);
 }
 
-static struct obex_service_driver pcsuite = {
+static const struct obex_service_driver pcsuite = {
 	.name = "Nokia OBEX PC Suite Services",
 	.service = OBEX_PCSUITE,
 	.channel = PCSUITE_CHANNEL,
@@ -467,7 +467,7 @@ static int backup_flush(void *object)
 	return 0;
 }
 
-static struct obex_mime_type_driver backup = {
+static const struct obex_mime_type_driver backup = {
 	.target = FTP_TARGET,
 	.target_size = TARGET_SIZE,
 	.mimetype = "application/vnd.nokia-backup",
