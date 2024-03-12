@@ -4,7 +4,7 @@
  *  BlueZ - Bluetooth protocol stack for Linux
  *
  *  Copyright (C) 2020  Intel Corporation. All rights reserved.
- *  Copyright 2023 NXP
+ *  Copyright 2023-2024 NXP
  *
  *
  */
@@ -94,6 +94,17 @@ struct avdtp_media_codec_capability {
 #error "Unknown byte order"
 #endif
 
+/* BAP Broadcast parameters */
+#define BCAST_SYNC_FACTOR	24			/* PA params */
+#define BCAST_OPTIONS		0x00		/* PA Create Sync */
+#define BCAST_SKIP			0x0000		/* PA Create Sync */
+#define BCAST_SYNC_TIMEOUT	0x4000		/* PA Create Sync */
+#define BCAST_SYNC_CTE_TYPE	0x00		/* PA Create Sync */
+#define BCAST_MSE			0x00		/* BIG Create Sync */
+#define BCAST_TIMEOUT		0x4000		/* BIG Create Sync */
+#define BCAST_CODE {0x01, 0x02, 0x68, 0x05, 0x53, 0xf1, 0x41, 0x5a, \
+				0xa2, 0x65, 0xbb, 0xaf, 0xc6, 0xea, 0x03, 0xb8}
+
 struct endpoint {
 	char *path;
 	char *uuid;
@@ -127,6 +138,7 @@ static GList *endpoints = NULL;
 static GList *local_endpoints = NULL;
 static GList *transports = NULL;
 static struct queue *ios = NULL;
+static uint8_t bcast_code[] = BCAST_CODE;
 
 struct transport {
 	GDBusProxy *proxy;
@@ -138,22 +150,6 @@ struct transport {
 	struct io *io;
 	uint32_t seq;
 	struct io *timer_io;
-};
-
-static const uint8_t base_lc3_16_2_1[] = {
-	0x28, 0x00, 0x00, /* Presentation Delay */
-	0x01, /* Number of Subgroups */
-	0x01, /* Number of BIS */
-	0x06, 0x00, 0x00, 0x00, 0x00, /* Code ID = LC3 (0x06) */
-	0x10, /* Codec Specific Configuration */
-	0x02, 0x01, 0x03, /* 16 KHZ */
-	0x02, 0x02, 0x01, /* 10 ms */
-	0x05, 0x03, 0x01, 0x00, 0x00, 0x00,  /* Front Left */
-	0x03, 0x04, 0x28, 0x00, /* Frame Length 40 bytes */
-	0x04, /* Metadata */
-	0x03, 0x02, 0x02, 0x00, /* Audio Context: Convertional */
-	0x01, /* BIS */
-	0x00, /* Codec Specific Configuration */
 };
 
 static void endpoint_unregister(void *data)
@@ -1006,11 +1002,6 @@ static const struct bt_shell_menu player_menu = {
 	{} },
 };
 
-static char *endpoint_generator(const char *text, int state)
-{
-	return generic_generator(text, state, endpoints);
-}
-
 static char *local_endpoint_generator(const char *text, int state)
 {
 	int len = strlen(text);
@@ -1030,6 +1021,17 @@ static char *local_endpoint_generator(const char *text, int state)
 	}
 
 	return NULL;
+}
+
+static char *endpoint_generator(const char *text, int state)
+{
+	char *ret;
+
+	ret = generic_generator(text, state, endpoints);
+	if (ret)
+		return ret;
+
+	return local_endpoint_generator(text, state);
 }
 
 static void print_endpoint(void *data, void *user_data)
@@ -1134,38 +1136,28 @@ static DBusMessage *endpoint_set_configuration(DBusConnection *conn,
 	return NULL;
 }
 
-struct codec_capabilities {
-	uint8_t len;
-	uint8_t type;
-	uint8_t data[UINT8_MAX];
-};
-
-#define data(args...) ((const unsigned char[]) { args })
-
-#define CODEC_DATA(args...) \
+#define CODEC_CAPABILITIES(_name, _uuid, _codec_id, _data, _meta) \
 	{ \
-		.iov_base = (void *)data(args), \
-		.iov_len = sizeof(data(args)), \
-	}
-
-#define CODEC_CAPABILITIES(_uuid, _codec_id, _data) \
-	{ \
+		.name = _name, \
 		.uuid = _uuid, \
 		.codec_id = _codec_id, \
 		.data = _data, \
+		.meta = _meta, \
 	}
 
 #define LC3_DATA(_freq, _duration, _chan_count, _len_min, _len_max) \
-	CODEC_DATA(0x03, LC3_FREQ, _freq, _freq >> 8, \
-		   0x02, LC3_DURATION, _duration, \
-		   0x02, LC3_CHAN_COUNT, _chan_count, \
-		   0x05, LC3_FRAME_LEN, _len_min, _len_min >> 8, _len_max, \
-		   _len_max >> 8)
+	UTIL_IOV_INIT(0x03, LC3_FREQ, _freq, _freq >> 8, \
+			0x02, LC3_DURATION, _duration, \
+			0x02, LC3_CHAN_COUNT, _chan_count, \
+			0x05, LC3_FRAME_LEN, _len_min, _len_min >> 8, \
+			_len_max, _len_max >> 8)
 
 static const struct capabilities {
+	const char *name;
 	const char *uuid;
 	uint8_t codec_id;
 	struct iovec data;
+	struct iovec meta;
 } caps[] = {
 	/* A2DP SBC Source:
 	 *
@@ -1175,8 +1167,10 @@ static const struct capabilities {
 	 * Blocks: 4 8 12 16
 	 * Bitpool Range: 2-64
 	 */
-	CODEC_CAPABILITIES(A2DP_SOURCE_UUID, A2DP_CODEC_SBC,
-					CODEC_DATA(0xff, 0xff, 2, 64)),
+	CODEC_CAPABILITIES("a2dp_src/sbc", A2DP_SOURCE_UUID, A2DP_CODEC_SBC,
+				UTIL_IOV_INIT(0xff, 0xff, 2, 64),
+				UTIL_IOV_INIT()),
+
 	/* A2DP SBC Sink:
 	 *
 	 * Channel Modes: Mono DualChannel Stereo JointStereo
@@ -1185,8 +1179,10 @@ static const struct capabilities {
 	 * Blocks: 4 8 12 16
 	 * Bitpool Range: 2-64
 	 */
-	CODEC_CAPABILITIES(A2DP_SINK_UUID, A2DP_CODEC_SBC,
-					CODEC_DATA(0xff, 0xff, 2, 64)),
+	CODEC_CAPABILITIES("a2dp_snk/sbc", A2DP_SINK_UUID, A2DP_CODEC_SBC,
+				UTIL_IOV_INIT(0xff, 0xff, 2, 64),
+				UTIL_IOV_INIT()),
+
 	/* PAC LC3 Sink:
 	 *
 	 * Frequencies: 8Khz 11Khz 16Khz 22Khz 24Khz 32Khz 44.1Khz 48Khz
@@ -1194,9 +1190,11 @@ static const struct capabilities {
 	 * Channel count: 3
 	 * Frame length: 30-240
 	 */
-	CODEC_CAPABILITIES(PAC_SINK_UUID, LC3_ID,
-					LC3_DATA(LC3_FREQ_ANY, LC3_DURATION_ANY,
-						3u, 30, 240)),
+	CODEC_CAPABILITIES("pac_snk/lc3", PAC_SINK_UUID, LC3_ID,
+				LC3_DATA(LC3_FREQ_ANY, LC3_DURATION_ANY, 3u, 30,
+					240),
+				UTIL_IOV_INIT()),
+
 	/* PAC LC3 Source:
 	 *
 	 * Frequencies: 8Khz 11Khz 16Khz 22Khz 24Khz 32Khz 44.1Khz 48Khz
@@ -1204,9 +1202,11 @@ static const struct capabilities {
 	 * Channel count: 3
 	 * Frame length: 30-240
 	 */
-	CODEC_CAPABILITIES(PAC_SOURCE_UUID, LC3_ID,
-					LC3_DATA(LC3_FREQ_ANY, LC3_DURATION_ANY,
-						3u, 30, 240)),
+	CODEC_CAPABILITIES("pac_src/lc3", PAC_SOURCE_UUID, LC3_ID,
+				LC3_DATA(LC3_FREQ_ANY, LC3_DURATION_ANY, 3u, 30,
+					240),
+				UTIL_IOV_INIT()),
+
 	/* Broadcast LC3 Source:
 	 *
 	 * Frequencies: 8Khz 11Khz 16Khz 22Khz 24Khz 32Khz 44.1Khz 48Khz
@@ -1214,9 +1214,10 @@ static const struct capabilities {
 	 * Channel count: 3
 	 * Frame length: 30-240
 	 */
-	CODEC_CAPABILITIES(BCAA_SERVICE_UUID, LC3_ID,
-					LC3_DATA(LC3_FREQ_ANY, LC3_DURATION_ANY,
-						3u, 30, 240)),
+	CODEC_CAPABILITIES("bcaa/lc3", BCAA_SERVICE_UUID, LC3_ID,
+				LC3_DATA(LC3_FREQ_ANY, LC3_DURATION_ANY, 3u, 30,
+					240),
+				UTIL_IOV_INIT()),
 
 	/* Broadcast LC3 Sink:
 	 *
@@ -1225,9 +1226,10 @@ static const struct capabilities {
 	 * Channel count: 3
 	 * Frame length: 30-240
 	 */
-	CODEC_CAPABILITIES(BAA_SERVICE_UUID, LC3_ID,
-					LC3_DATA(LC3_FREQ_ANY, LC3_DURATION_ANY,
-						3u, 30, 240)),
+	CODEC_CAPABILITIES("baa/lc3", BAA_SERVICE_UUID, LC3_ID,
+				LC3_DATA(LC3_FREQ_ANY, LC3_DURATION_ANY, 3u, 30,
+					240),
+				UTIL_IOV_INIT()),
 };
 
 struct codec_qos {
@@ -1262,32 +1264,36 @@ static struct codec_preset sbc_presets[] = {
 	 * mono, and 512kb/s for two-channel modes.
 	 */
 	SBC_PRESET("MQ_MONO_44_1",
-		CODEC_DATA(0x28, 0x15, 2, SBC_BITPOOL_MQ_MONO_44100)),
+		UTIL_IOV_INIT(0x28, 0x15, 2, SBC_BITPOOL_MQ_MONO_44100)),
 	SBC_PRESET("MQ_MONO_48",
-		CODEC_DATA(0x18, 0x15, 2, SBC_BITPOOL_MQ_MONO_48000)),
+		UTIL_IOV_INIT(0x18, 0x15, 2, SBC_BITPOOL_MQ_MONO_48000)),
 	SBC_PRESET("MQ_STEREO_44_1",
-		CODEC_DATA(0x21, 0x15, 2, SBC_BITPOOL_MQ_JOINT_STEREO_44100)),
+		UTIL_IOV_INIT(0x21, 0x15, 2,
+				SBC_BITPOOL_MQ_JOINT_STEREO_44100)),
 	SBC_PRESET("MQ_STEREO_48",
-		CODEC_DATA(0x11, 0x15, 2, SBC_BITPOOL_MQ_JOINT_STEREO_48000)),
+		UTIL_IOV_INIT(0x11, 0x15, 2,
+				SBC_BITPOOL_MQ_JOINT_STEREO_48000)),
 	SBC_PRESET("HQ_MONO_44_1",
-		CODEC_DATA(0x28, 0x15, 2, SBC_BITPOOL_HQ_MONO_44100)),
+		UTIL_IOV_INIT(0x28, 0x15, 2, SBC_BITPOOL_HQ_MONO_44100)),
 	SBC_PRESET("HQ_MONO_48",
-		CODEC_DATA(0x18, 0x15, 2, SBC_BITPOOL_HQ_MONO_48000)),
+		UTIL_IOV_INIT(0x18, 0x15, 2, SBC_BITPOOL_HQ_MONO_48000)),
 	SBC_PRESET("HQ_STEREO_44_1",
-		CODEC_DATA(0x21, 0x15, 2, SBC_BITPOOL_HQ_JOINT_STEREO_44100)),
+		UTIL_IOV_INIT(0x21, 0x15, 2,
+				SBC_BITPOOL_HQ_JOINT_STEREO_44100)),
 	SBC_PRESET("HQ_STEREO_48",
-		CODEC_DATA(0x11, 0x15, 2, SBC_BITPOOL_HQ_JOINT_STEREO_48000)),
+		UTIL_IOV_INIT(0x11, 0x15, 2,
+			      SBC_BITPOOL_HQ_JOINT_STEREO_48000)),
 	/* Higher bitrates not recommended by A2DP spec, it dual channel to
 	 * avoid going above 53 bitpool:
 	 *
 	 * https://habr.com/en/post/456476/
 	 * https://gitlab.freedesktop.org/pulseaudio/pulseaudio/-/issues/1092
 	 */
-	SBC_PRESET("XQ_DUAL_44_1", CODEC_DATA(0x24, 0x15, 2, 43)),
-	SBC_PRESET("XQ_DUAL_48", CODEC_DATA(0x14, 0x15, 2, 39)),
+	SBC_PRESET("XQ_DUAL_44_1", UTIL_IOV_INIT(0x24, 0x15, 2, 43)),
+	SBC_PRESET("XQ_DUAL_48", UTIL_IOV_INIT(0x14, 0x15, 2, 39)),
 	/* Ultra high bitpool that fits in 512 kbps mandatory bitrate */
-	SBC_PRESET("UQ_STEREO_44_1", CODEC_DATA(0x21, 0x15, 2, 64)),
-	SBC_PRESET("UQ_STEREO_48", CODEC_DATA(0x11, 0x15, 2, 58)),
+	SBC_PRESET("UQ_STEREO_44_1", UTIL_IOV_INIT(0x21, 0x15, 2, 64)),
+	SBC_PRESET("UQ_STEREO_48", UTIL_IOV_INIT(0x11, 0x15, 2, 58)),
 };
 
 #define QOS_CONFIG(_interval, _framing, _phy, _sdu, _rtn, _latency, _delay) \
@@ -1332,16 +1338,16 @@ static struct codec_preset sbc_presets[] = {
 	QOS_FRAMED_2M(10000u, _sdu, _rtn, _latency, _delay)
 
 #define LC3_PRESET_DATA(_freq, _duration, _len) \
-	CODEC_DATA(0x02, LC3_CONFIG_FREQ, _freq, \
-		   0x02, LC3_CONFIG_DURATION, _duration, \
-		   0x03, LC3_CONFIG_FRAME_LEN, _len, _len >> 8)
+	UTIL_IOV_INIT(0x02, LC3_CONFIG_FREQ, _freq, \
+			0x02, LC3_CONFIG_DURATION, _duration, \
+			0x03, LC3_CONFIG_FRAME_LEN, _len, _len >> 8)
 
 #define LC3_PRESET_DATA_ALL(_freq, _duration, _alloc, _len) \
-	CODEC_DATA(0x02, LC3_CONFIG_FREQ, _freq, \
-		   0x02, LC3_CONFIG_DURATION, _duration, \
-		   0x05, LC3_CONFIG_CHAN_ALLOC, _alloc, _alloc >> 8, \
-		   _alloc >> 16, _alloc >> 24, \
-		   0x03, LC3_CONFIG_FRAME_LEN, _len, _len >> 8)
+	UTIL_IOV_INIT(0x02, LC3_CONFIG_FREQ, _freq, \
+			0x02, LC3_CONFIG_DURATION, _duration, \
+			0x05, LC3_CONFIG_CHAN_ALLOC, _alloc, _alloc >> 8, \
+			_alloc >> 16, _alloc >> 24, \
+			0x03, LC3_CONFIG_FRAME_LEN, _len, _len >> 8)
 
 #define LC3_PRESET_8KHZ(_duration, _len) \
 	LC3_PRESET_DATA(LC3_CONFIG_FREQ_8KHZ, _duration, _len)
@@ -1879,36 +1885,32 @@ static DBusMessage *endpoint_select_configuration(DBusConnection *conn,
 struct endpoint_config {
 	GDBusProxy *proxy;
 	struct endpoint *ep;
-	struct iovec *caps;
-	struct iovec *meta;
+	struct iovec *caps;		/* Codec Specific Configuration LTVs */
+	struct iovec *meta;		/* Metadata LTVs*/
 	uint8_t target_latency;
-	struct codec_qos qos;
-};
-
-#define BCODE {0x01, 0x02, 0x68, 0x05, 0x53, 0xf1, 0x41, 0x5a, \
-				0xa2, 0x65, 0xbb, 0xaf, 0xc6, 0xea, 0x03, 0xb8}
-
-static struct bt_iso_qos bcast_qos = {
-	.bcast = {
-		.big = BT_ISO_QOS_BIG_UNSET,
-		.bis = BT_ISO_QOS_BIS_UNSET,
-		.sync_factor = 24,
-		.packing = 0x00,
-		.framing = 0x00,
-		.encryption = 0x00,
-		.bcode = BCODE,
-		.options = 0x00,
-		.skip = 0x0000,
-		.sync_timeout = 0x4000,
-		.sync_cte_type = 0x00,
-		.mse = 0x00,
-		.timeout = 0x4000,
-	}
+	struct codec_qos qos;	/* BAP QOS configuration parameters */
+	uint8_t  sync_factor;		/* PA parameter */
+	uint8_t  options;		/* PA create sync parameter */
+	uint16_t skip;			/* PA create sync parameter */
+	uint16_t sync_timeout;		/* PA create sync parameter */
+	uint8_t  sync_cte_type;		/* PA create sync parameter */
+	uint8_t  mse;			/* BIG create sync parameter */
+	uint16_t timeout;		/* BIG create sync parameter */
 };
 
 static void append_io_qos(DBusMessageIter *iter, struct endpoint_config *cfg)
 {
 	struct codec_qos *qos = &cfg->qos;
+
+	bt_shell_printf("Framing 0x%02x\n", qos->framing);
+
+	g_dbus_dict_append_entry(iter, "Framing", DBUS_TYPE_BYTE,
+							&qos->framing);
+
+	bt_shell_printf("PresentationDelay %u\n", qos->delay);
+
+	g_dbus_dict_append_entry(iter, "PresentationDelay",
+			DBUS_TYPE_UINT32, &qos->delay);
 
 	bt_shell_printf("Interval %u\n", qos->interval);
 
@@ -1971,59 +1973,54 @@ static void append_ucast_qos(DBusMessageIter *iter, struct endpoint_config *cfg)
 
 static void append_bcast_qos(DBusMessageIter *iter, struct endpoint_config *cfg)
 {
-	if (bcast_qos.bcast.big != BT_ISO_QOS_BIG_UNSET) {
-		bt_shell_printf("BIG 0x%2.2x\n", bcast_qos.bcast.big);
+	if (cfg->ep->iso_group != BT_ISO_QOS_BIG_UNSET) {
+		bt_shell_printf("BIG 0x%2.2x\n", cfg->ep->iso_group);
 		g_dbus_dict_append_entry(iter, "BIG", DBUS_TYPE_BYTE,
-							&bcast_qos.bcast.big);
+							&cfg->ep->iso_group);
 	}
 
-	if (bcast_qos.bcast.bis != BT_ISO_QOS_BIS_UNSET) {
-		bt_shell_printf("BIS 0x%2.2x\n", bcast_qos.bcast.bis);
+	if (cfg->ep->iso_stream != BT_ISO_QOS_BIS_UNSET) {
+		bt_shell_printf("BIS 0x%2.2x\n", cfg->ep->iso_stream);
 		g_dbus_dict_append_entry(iter, "BIS", DBUS_TYPE_BYTE,
-							&bcast_qos.bcast.bis);
+							&cfg->ep->iso_stream);
 	}
 
-	bt_shell_printf("Framing 0x%02x\n", bcast_qos.bcast.framing);
-
-	g_dbus_dict_append_entry(iter, "Framing", DBUS_TYPE_BYTE,
-						&bcast_qos.bcast.framing);
-
-	bt_shell_printf("SyncFactor %u\n", bcast_qos.bcast.sync_factor);
+	bt_shell_printf("SyncFactor %u\n", cfg->sync_factor);
 
 	g_dbus_dict_append_entry(iter, "SyncFactor", DBUS_TYPE_BYTE,
-						&bcast_qos.bcast.sync_factor);
+						&cfg->sync_factor);
 
-	bt_shell_printf("Options %u\n", bcast_qos.bcast.options);
+	bt_shell_printf("Options %u\n", cfg->options);
 
 	g_dbus_dict_append_entry(iter, "Options", DBUS_TYPE_BYTE,
-						&bcast_qos.bcast.options);
+						&cfg->options);
 
-	bt_shell_printf("Skip %u\n", bcast_qos.bcast.skip);
+	bt_shell_printf("Skip %u\n", cfg->skip);
 
 	g_dbus_dict_append_entry(iter, "Skip", DBUS_TYPE_UINT16,
-						&bcast_qos.bcast.skip);
+						&cfg->skip);
 
-	bt_shell_printf("SyncTimeout %u\n", bcast_qos.bcast.sync_timeout);
+	bt_shell_printf("SyncTimeout %u\n", cfg->sync_timeout);
 
 	g_dbus_dict_append_entry(iter, "SyncTimeout", DBUS_TYPE_UINT16,
-						&bcast_qos.bcast.sync_timeout);
+						&cfg->sync_timeout);
 
-	bt_shell_printf("SyncCteType %u\n", bcast_qos.bcast.sync_cte_type);
+	bt_shell_printf("SyncCteType %u\n", cfg->sync_cte_type);
 
 	g_dbus_dict_append_entry(iter, "SyncType", DBUS_TYPE_BYTE,
-					&bcast_qos.bcast.sync_cte_type);
+					&cfg->sync_cte_type);
 
-	bt_shell_printf("MSE %u\n", bcast_qos.bcast.mse);
+	bt_shell_printf("MSE %u\n", cfg->mse);
 
 	g_dbus_dict_append_entry(iter, "MSE", DBUS_TYPE_BYTE,
-						&bcast_qos.bcast.mse);
+						&cfg->mse);
 
-	bt_shell_printf("Timeout %u\n", bcast_qos.bcast.timeout);
+	bt_shell_printf("Timeout %u\n", cfg->timeout);
 
 	g_dbus_dict_append_entry(iter, "Timeout", DBUS_TYPE_UINT16,
-						&bcast_qos.bcast.timeout);
+						&cfg->timeout);
 
-	if (cfg->ep->bcode) {
+	if (cfg->ep->bcode->iov_len != 0) {
 		const char *key = "BCode";
 
 		bt_shell_printf("BCode:\n");
@@ -2036,6 +2033,7 @@ static void append_bcast_qos(DBusMessageIter *iter, struct endpoint_config *cfg)
 						cfg->ep->bcode->iov_len);
 	}
 
+	/* Add BAP codec QOS configuration */
 	append_io_qos(iter, cfg);
 }
 
@@ -2178,7 +2176,7 @@ static DBusMessage *endpoint_select_properties_reply(struct endpoint *ep,
 	cfg->ep = ep;
 
 	/* Copy capabilities */
-	iov_append(&cfg->caps, preset->data.iov_base, preset->data.iov_len);
+	cfg->caps = util_iov_dup(&preset->data, 1);
 	cfg->target_latency = preset->target_latency;
 
 	dbus_message_iter_init(msg, &iter);
@@ -2194,8 +2192,7 @@ static DBusMessage *endpoint_select_properties_reply(struct endpoint *ep,
 	}
 
 	/* Copy metadata */
-	if (ep->meta)
-		iov_append(&cfg->meta, ep->meta->iov_base, ep->meta->iov_len);
+	cfg->meta = util_iov_dup(ep->meta, 1);
 
 	if (preset->qos.phy) {
 		/* Set QoS parameters */
@@ -2474,6 +2471,36 @@ static void print_ldac(a2dp_ldac_t *ldac, uint8_t size)
 	bt_shell_printf("\n");
 }
 
+static void print_opus_g(a2dp_opus_g_t *opus, uint8_t size)
+{
+	bt_shell_printf("\t\tVendor Specific Value (Opus [Google])");
+
+	if (size < sizeof(*opus)) {
+		bt_shell_printf(" (broken)\n");
+		return;
+	}
+
+	bt_shell_printf("\n\t\tFrequencies: ");
+	if (opus->data & OPUS_G_FREQUENCY_48000)
+		bt_shell_printf("48kHz ");
+
+	bt_shell_printf("\n\t\tChannel modes: ");
+	if (opus->data & OPUS_G_CHANNELS_MONO)
+		bt_shell_printf("Mono ");
+	if (opus->data & OPUS_G_CHANNELS_STEREO)
+		bt_shell_printf("Stereo ");
+	if (opus->data & OPUS_G_CHANNELS_DUAL)
+		bt_shell_printf("Dual Mono ");
+
+	bt_shell_printf("\n\t\tFrame durations: ");
+	if (opus->data & OPUS_G_DURATION_100)
+		bt_shell_printf("10 ms ");
+	if (opus->data & OPUS_G_DURATION_200)
+		bt_shell_printf("20 ms ");
+
+	bt_shell_printf("\n");
+}
+
 static void print_vendor(a2dp_vendor_codec_t *vendor, uint8_t size)
 {
 	uint32_t vendor_id;
@@ -2511,6 +2538,8 @@ static void print_vendor(a2dp_vendor_codec_t *vendor, uint8_t size)
 		print_aptx_hd((void *) vendor, size);
 	else if (vendor_id == LDAC_VENDOR_ID && codec_id == LDAC_CODEC_ID)
 		print_ldac((void *) vendor, size);
+	else if (vendor_id == OPUS_G_VENDOR_ID && codec_id == OPUS_G_CODEC_ID)
+		print_opus_g((void *) vendor, size);
 }
 
 static void print_mpeg24(a2dp_aac_t *aac, uint8_t size)
@@ -2802,13 +2831,44 @@ static int print_a2dp_codec(uint8_t codec, void *data, uint8_t size)
 	return 0;
 }
 
+static void print_hexdump(const char *label, struct iovec *iov)
+{
+	if (!iov)
+		return;
+
+	bt_shell_printf("%s:\n", label);
+	bt_shell_hexdump(iov->iov_base, iov->iov_len);
+}
+
+static void print_codec(const char *uuid, uint8_t codec, struct iovec *caps,
+						struct iovec *meta)
+{
+	if (!strcasecmp(uuid, A2DP_SINK_UUID) ||
+			!strcasecmp(uuid, A2DP_SOURCE_UUID)) {
+		print_a2dp_codec(codec, caps->iov_base, caps->iov_len);
+		return;
+	}
+
+	if (codec != LC3_ID) {
+		print_hexdump("Capabilities", caps);
+		print_hexdump("Metadata", meta);
+		return;
+	}
+
+	print_lc3_caps(caps->iov_base, caps->iov_len);
+
+	if (!meta)
+		return;
+
+	print_lc3_meta(meta->iov_base, meta->iov_len);
+}
+
 static void print_capabilities(GDBusProxy *proxy)
 {
 	DBusMessageIter iter, subiter;
 	const char *uuid;
 	uint8_t codec;
-	uint8_t *data;
-	int len;
+	struct iovec caps, meta;
 
 	if (!g_dbus_proxy_get_property(proxy, "UUID", &iter))
 		return;
@@ -2825,29 +2885,37 @@ static void print_capabilities(GDBusProxy *proxy)
 
 	dbus_message_iter_recurse(&iter, &subiter);
 
-	dbus_message_iter_get_fixed_array(&subiter, &data, &len);
+	dbus_message_iter_get_fixed_array(&subiter, &caps.iov_base,
+						(int *)&caps.iov_len);
 
-	if (!strcasecmp(uuid, A2DP_SINK_UUID) ||
-			!strcasecmp(uuid, A2DP_SOURCE_UUID)) {
-		print_a2dp_codec(codec, data, len);
-		return;
+	if (g_dbus_proxy_get_property(proxy, "Metadata", &iter)) {
+		dbus_message_iter_recurse(&iter, &subiter);
+		dbus_message_iter_get_fixed_array(&subiter, &meta.iov_base,
+						  (int *)&meta.iov_len);
+	} else {
+		meta.iov_base = NULL;
+		meta.iov_len = 0;
 	}
 
-	if (codec != LC3_ID) {
-		print_property(proxy, "Capabilities");
-		return;
-	}
+	print_codec(uuid, codec, &caps, &meta);
+}
 
-	print_lc3_caps(data, len);
-
-	if (!g_dbus_proxy_get_property(proxy, "Metadata", &iter))
-		return;
-
-	dbus_message_iter_recurse(&iter, &subiter);
-
-	dbus_message_iter_get_fixed_array(&subiter, &data, &len);
-
-	print_lc3_meta(data, len);
+static void print_local_endpoint(struct endpoint *ep)
+{
+	bt_shell_printf("Endpoint %s\n", ep->path);
+	bt_shell_printf("\tUUID %s\n", ep->uuid);
+	bt_shell_printf("\tCodec 0x%02x (%u)\n", ep->codec, ep->codec);
+	if (ep->caps)
+		print_codec(ep->uuid, ep->codec, ep->caps, ep->meta);
+	if (ep->locations)
+		bt_shell_printf("\tLocations 0x%08x (%u)\n", ep->locations,
+				ep->locations);
+	if (ep->supported_context)
+		bt_shell_printf("\tSupportedContext 0x%08x (%u)\n",
+				ep->supported_context, ep->supported_context);
+	if (ep->context)
+		bt_shell_printf("\tContext 0x%08x (%u)\n", ep->context,
+				ep->context);
 }
 
 static void cmd_show_endpoint(int argc, char *argv[])
@@ -2857,6 +2925,12 @@ static void cmd_show_endpoint(int argc, char *argv[])
 	proxy = g_dbus_proxy_lookup(endpoints, NULL, argv[1],
 						BLUEZ_MEDIA_ENDPOINT_INTERFACE);
 	if (!proxy) {
+		struct endpoint *ep;
+
+		ep = endpoint_find(argv[1]);
+		if (ep)
+			return print_local_endpoint(ep);
+
 		bt_shell_printf("Endpoint %s not found\n", argv[1]);
 		return bt_shell_noninteractive_quit(EXIT_SUCCESS);
 	}
@@ -2899,17 +2973,8 @@ static void endpoint_free(void *data)
 {
 	struct endpoint *ep = data;
 
-	if (ep->caps) {
-		if (ep->caps->iov_base)
-			g_free(ep->caps->iov_base);
-		g_free(ep->caps);
-	}
-
-	if (ep->meta) {
-		if (ep->meta->iov_base)
-			g_free(ep->meta->iov_base);
-		g_free(ep->meta);
-	}
+	util_iov_free(ep->caps, 1);
+	util_iov_free(ep->meta, 1);
 
 	if (ep->msg)
 		dbus_message_unref(ep->msg);
@@ -3271,12 +3336,8 @@ static void endpoint_iso_group(const char *input, void *user_data)
 		ep->iso_group = value;
 	}
 
-	if (!ep->broadcast)
-		bt_shell_prompt_input(ep->path, "CIS (auto/value):",
-			endpoint_iso_stream, ep);
-	else
-		bt_shell_prompt_input(ep->path, "BIS (auto/value):",
-			endpoint_iso_stream, ep);
+	bt_shell_prompt_input(ep->path, "CIS (auto/value):",
+		endpoint_iso_stream, ep);
 }
 
 static void endpoint_context(const char *input, void *user_data)
@@ -3294,12 +3355,8 @@ static void endpoint_context(const char *input, void *user_data)
 
 	ep->context = value;
 
-	if (ep->broadcast)
-		bt_shell_prompt_input(ep->path, "BIG (auto/value):",
-			endpoint_iso_group, ep);
-	else
-		bt_shell_prompt_input(ep->path, "CIG (auto/value):",
-			endpoint_iso_group, ep);
+	bt_shell_prompt_input(ep->path, "CIG (auto/value):",
+		endpoint_iso_group, ep);
 }
 
 static void endpoint_supported_context(const char *input, void *user_data)
@@ -3316,6 +3373,11 @@ static void endpoint_supported_context(const char *input, void *user_data)
 	}
 
 	ep->supported_context = value;
+
+	if (ep->broadcast) {
+		endpoint_register(ep);
+		return;
+	}
 
 	bt_shell_prompt_input(ep->path, "Context (value):", endpoint_context,
 									ep);
@@ -3366,13 +3428,6 @@ static void endpoint_auto_accept(const char *input, void *user_data)
 {
 	struct endpoint *ep = user_data;
 
-	if (!strcmp(ep->uuid, BCAA_SERVICE_UUID) ||
-		!strcmp(ep->uuid, BAA_SERVICE_UUID)) {
-		ep->broadcast = true;
-	} else {
-		ep->broadcast = false;
-	}
-
 	if (!strcasecmp(input, "y") || !strcasecmp(input, "yes")) {
 		ep->auto_accept = true;
 		bt_shell_prompt_input(ep->path, "Max Transports (auto/value):",
@@ -3392,20 +3447,18 @@ static void endpoint_auto_accept(const char *input, void *user_data)
 static void endpoint_set_metadata(const char *input, void *user_data)
 {
 	struct endpoint *ep = user_data;
+	struct iovec iov;
 
 	if (!strcasecmp(input, "n") || !strcasecmp(input, "no")) {
-		free(ep->meta->iov_base);
+		util_iov_free(ep->meta, 1);
 		ep->meta = NULL;
 		goto done;
 	}
 
-	if (!ep->meta)
-		ep->meta = g_new0(struct iovec, 1);
-
-	ep->meta->iov_base = str2bytearray((char *) input, &ep->meta->iov_len);
-	if (!ep->meta->iov_base) {
-		free(ep->meta);
-		ep->meta = NULL;
+	iov.iov_base = str2bytearray((char *) input, &iov.iov_len);
+	if (iov.iov_base) {
+		util_iov_free(ep->meta, 1);
+		ep->meta = util_iov_dup(&iov, 1);
 	}
 
 done:
@@ -3416,22 +3469,21 @@ done:
 static void endpoint_set_capabilities(const char *input, void *user_data)
 {
 	struct endpoint *ep = user_data;
+	struct iovec iov;
 
-	if (ep->caps && ep->caps->iov_base) {
-		g_free(ep->caps->iov_base);
-		ep->caps = g_new0(struct iovec, 1);
-	} else
-		ep->caps = g_new0(struct iovec, 1);
-
-	ep->caps->iov_base = str2bytearray((char *) input, &ep->caps->iov_len);
-
-	if (ep->caps->iov_len == 0x01 &&
-			(*(uint8_t *)(ep->caps->iov_base)) == 0x00) {
-		g_free(ep->caps->iov_base);
-		ep->caps->iov_base = NULL;
-		ep->caps->iov_len = 0x00;
+	if (!strcasecmp(input, "n") || !strcasecmp(input, "no")) {
+		util_iov_free(ep->caps, 1);
+		ep->caps = NULL;
+		goto done;
 	}
 
+	iov.iov_base = str2bytearray((char *) input, &iov.iov_len);
+	if (iov.iov_base) {
+		util_iov_free(ep->caps, 1);
+		ep->caps = util_iov_dup(&iov, 1);
+	}
+
+done:
 	bt_shell_prompt_input(ep->path, "Enter Metadata (value/no):",
 					endpoint_set_metadata, ep);
 }
@@ -3490,6 +3542,13 @@ static void cmd_register_endpoint(int argc, char *argv[])
 					g_list_length(local_endpoints));
 	local_endpoints = g_list_append(local_endpoints, ep);
 
+	if (!strcmp(ep->uuid, BCAA_SERVICE_UUID) ||
+		!strcmp(ep->uuid, BAA_SERVICE_UUID)) {
+		ep->broadcast = true;
+	} else {
+		ep->broadcast = false;
+	}
+
 	if (strrchr(argv[2], ':')) {
 		ep->codec = 0xff;
 		parse_vendor_codec(argv[2], &ep->cid, &ep->vid);
@@ -3507,12 +3566,13 @@ static void cmd_register_endpoint(int argc, char *argv[])
 
 		cap = find_capabilities(ep->uuid, ep->codec);
 		if (cap) {
-			if (ep->caps)
-				ep->caps->iov_len = 0;
-
 			/* Copy capabilities */
-			iov_append(&ep->caps, cap->data.iov_base,
-							cap->data.iov_len);
+			util_iov_free(ep->caps, 1);
+			ep->caps = util_iov_dup(&cap->data, 1);
+
+			/* Copy metadata */
+			util_iov_free(ep->meta, 1);
+			ep->meta = util_iov_dup(&cap->meta, 1);
 
 			bt_shell_prompt_input(ep->path, "Auto Accept (yes/no):",
 						endpoint_auto_accept, ep);
@@ -3638,6 +3698,147 @@ static void endpoint_config(const char *input, void *user_data)
 
 static struct endpoint *endpoint_new(const struct capabilities *cap);
 
+static void endpoint_set_metadata_cfg(const char *input, void *user_data)
+{
+	struct endpoint_config *cfg = user_data;
+
+	if (!strcasecmp(input, "n") || !strcasecmp(input, "no"))
+		goto done;
+
+	if (!cfg->meta)
+		cfg->meta = g_new0(struct iovec, 1);
+
+	cfg->meta->iov_base = str2bytearray((char *) input,
+				&cfg->meta->iov_len);
+	if (!cfg->meta->iov_base) {
+		free(cfg->meta);
+		cfg->meta = NULL;
+	}
+
+done:
+	endpoint_set_config(cfg);
+}
+
+static struct iovec *iov_append_ltv(struct iovec **iov, uint8_t l,
+					uint8_t t, void *v)
+{
+	if (!*iov)
+		*iov = new0(struct iovec, 1);
+
+	if (!((*iov)->iov_base))
+		(*iov)->iov_base = new0(uint8_t, l + 1);
+
+	util_iov_push_u8(*iov, l);
+	util_iov_push_u8(*iov, t);
+	util_iov_push_mem(*iov, l - 1, v);
+
+	return *iov;
+}
+
+static void config_endpoint_channel_location(const char *input, void *user_data)
+{
+	struct endpoint_config *cfg = user_data;
+	char *endptr = NULL;
+	uint32_t location;
+
+	if (!strcasecmp(input, "n") || !strcasecmp(input, "no"))
+		goto add_meta;
+
+	location = strtol(input, &endptr, 0);
+
+	if (!endptr || *endptr != '\0') {
+		bt_shell_printf("Invalid argument: %s\n", input);
+		return bt_shell_noninteractive_quit(EXIT_FAILURE);
+	}
+
+	/* Add Channel Allocation LTV in capabilities */
+	location = cpu_to_le32(location);
+	iov_append_ltv(&cfg->caps, LC3_CONFIG_CHAN_ALLOC_LEN,
+			LC3_CONFIG_CHAN_ALLOC, &location);
+
+add_meta:
+	/* Add metadata */
+	bt_shell_prompt_input(cfg->ep->path, "Enter Metadata (value/no):",
+			endpoint_set_metadata_cfg, cfg);
+}
+
+static void ltv_find(size_t i, uint8_t l, uint8_t t, uint8_t *v,
+					void *user_data)
+{
+	bool *found = user_data;
+
+	*found = true;
+}
+
+static void config_endpoint_iso_group(const char *input, void *user_data)
+{
+	struct endpoint_config *cfg = user_data;
+	char *endptr = NULL;
+	int value;
+	uint8_t type = LC3_CONFIG_CHAN_ALLOC;
+	bool found = false;
+
+	if (!strcasecmp(input, "a") || !strcasecmp(input, "auto")) {
+		cfg->ep->iso_group = BT_ISO_QOS_GROUP_UNSET;
+	} else {
+		value = strtol(input, &endptr, 0);
+
+		if (!endptr || *endptr != '\0' || value > UINT8_MAX) {
+			bt_shell_printf("Invalid argument: %s\n", input);
+			return bt_shell_noninteractive_quit(EXIT_FAILURE);
+		}
+
+		cfg->ep->iso_group = value;
+	}
+
+	/* Check if Channel Allocation is present in caps */
+	util_ltv_foreach(cfg->caps->iov_base,
+			cfg->caps->iov_len, &type,
+			ltv_find, &found);
+
+	/* Add Channel Allocation if it is not present in caps */
+	if (!found) {
+		bt_shell_prompt_input(cfg->ep->path,
+				"Enter channel location (value/no):",
+				config_endpoint_channel_location, cfg);
+	} else {
+		/* Add metadata */
+		bt_shell_prompt_input(cfg->ep->path,
+				"Enter Metadata (value/no):",
+				endpoint_set_metadata_cfg, cfg);
+	}
+}
+
+static void endpoint_set_config_bcast(struct endpoint_config *cfg)
+{
+	cfg->ep->bcode = g_new0(struct iovec, 1);
+	iov_append(&cfg->ep->bcode, bcast_code,
+			sizeof(bcast_code));
+
+	/* Add periodic advertisement parameters */
+	cfg->sync_factor = BCAST_SYNC_FACTOR;
+	cfg->options = BCAST_OPTIONS;
+	cfg->skip = BCAST_SKIP;
+	cfg->sync_timeout = BCAST_SYNC_TIMEOUT;
+	cfg->sync_cte_type = BCAST_SYNC_CTE_TYPE;
+
+	/* Add BIG create sync parameters */
+	cfg->mse = BCAST_MSE;
+	cfg->timeout = BCAST_TIMEOUT;
+
+	if ((strcmp(cfg->ep->uuid, BAA_SERVICE_UUID) == 0)) {
+		/* A broadcast sink endpoint config does not need
+		 * user input.
+		 */
+		endpoint_set_config(cfg);
+		return;
+	}
+
+	bt_shell_prompt_input(cfg->ep->path,
+		"BIG (auto/value):",
+		config_endpoint_iso_group, cfg);
+}
+
 static void cmd_config_endpoint(int argc, char *argv[])
 {
 	struct endpoint_config *cfg;
@@ -3667,22 +3868,18 @@ static void cmd_config_endpoint(int argc, char *argv[])
 			goto fail;
 		}
 
-		if (cfg->ep->broadcast) {
-			iov_append(&cfg->ep->bcode, bcast_qos.bcast.bcode,
-				sizeof(bcast_qos.bcast.bcode));
-			/* Copy capabilities for broadcast*/
-			iov_append(&cfg->caps, base_lc3_16_2_1,
-				sizeof(base_lc3_16_2_1));
-		} else {
-			/* Copy capabilities */
-			iov_append(&cfg->caps, preset->data.iov_base,
-							preset->data.iov_len);
-		}
+		/* Copy capabilities */
+		iov_append(&cfg->caps, preset->data.iov_base,
+				preset->data.iov_len);
 
 		/* Set QoS parameters */
 		cfg->qos = preset->qos;
 
-		endpoint_set_config(cfg);
+		if (cfg->ep->broadcast)
+			endpoint_set_config_bcast(cfg);
+		else
+			endpoint_set_config(cfg);
+
 		return;
 	}
 
@@ -4093,6 +4290,30 @@ static const struct bt_shell_menu endpoint_menu = {
 	{} },
 };
 
+static void endpoint_init_bcast(struct endpoint *ep)
+{
+	if (!strcmp(ep->uuid, BAA_SERVICE_UUID)) {
+		ep->locations = EP_SNK_LOCATIONS;
+		ep->supported_context = EP_SUPPORTED_SNK_CTXT;
+	} else {
+		ep->locations = EP_SRC_LOCATIONS;
+		ep->supported_context = EP_SUPPORTED_SRC_CTXT;
+	}
+}
+
+static void endpoint_init_ucast(struct endpoint *ep)
+{
+	if (!strcmp(ep->uuid, PAC_SINK_UUID)) {
+		ep->locations = EP_SNK_LOCATIONS;
+		ep->supported_context = EP_SUPPORTED_SNK_CTXT;
+		ep->context = EP_SNK_CTXT;
+	} else if (!strcmp(ep->uuid, PAC_SOURCE_UUID)) {
+		ep->locations = EP_SRC_LOCATIONS;
+		ep->supported_context = EP_SUPPORTED_SRC_CTXT;
+		ep->context = EP_SRC_CTXT;
+	}
+}
+
 static void endpoint_init_defaults(struct endpoint *ep)
 {
 	ep->preset = find_presets(ep->uuid, ep->codec, ep->vid, ep->cid);
@@ -4108,18 +4329,11 @@ static void endpoint_init_defaults(struct endpoint *ep)
 
 	ep->broadcast = (strcmp(ep->uuid, BCAA_SERVICE_UUID) &&
 			strcmp(ep->uuid, BAA_SERVICE_UUID)) ? false : true;
-	if (ep->broadcast)
-		return;
 
-	if (!strcmp(ep->uuid, PAC_SINK_UUID)) {
-		ep->locations = EP_SNK_LOCATIONS;
-		ep->supported_context = EP_SUPPORTED_SNK_CTXT;
-		ep->context = EP_SNK_CTXT;
-	} else if (!strcmp(ep->uuid, PAC_SOURCE_UUID)) {
-		ep->locations = EP_SRC_LOCATIONS;
-		ep->supported_context = EP_SUPPORTED_SRC_CTXT;
-		ep->context = EP_SRC_CTXT;
-	}
+	if (ep->broadcast)
+		endpoint_init_bcast(ep);
+	else
+		endpoint_init_ucast(ep);
 }
 
 static struct endpoint *endpoint_new(const struct capabilities *cap)
@@ -4129,10 +4343,13 @@ static struct endpoint *endpoint_new(const struct capabilities *cap)
 	ep = new0(struct endpoint, 1);
 	ep->uuid = g_strdup(cap->uuid);
 	ep->codec = cap->codec_id;
-	ep->path = g_strdup_printf("%s/ep%u", BLUEZ_MEDIA_ENDPOINT_PATH,
-					g_list_length(local_endpoints));
+	ep->path = g_strdup_printf("%s/%s", BLUEZ_MEDIA_ENDPOINT_PATH,
+				cap->name);
 	/* Copy capabilities */
-	iov_append(&ep->caps, cap->data.iov_base, cap->data.iov_len);
+	ep->caps = util_iov_dup(&cap->data, 1);
+	/* Copy metadata */
+	ep->meta = util_iov_dup(&cap->meta, 1);
+
 	local_endpoints = g_list_append(local_endpoints, ep);
 
 	return ep;

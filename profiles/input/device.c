@@ -81,7 +81,7 @@ struct input_device {
 };
 
 static int idle_timeout = 0;
-static bool uhid_enabled = false;
+static bool uhid_enabled = true;
 static bool classic_bonded_only = true;
 
 void input_set_idle_timeout(int timeout)
@@ -983,6 +983,10 @@ static int uhid_disconnect(struct input_device *idev)
 	struct uhid_event ev;
 
 	if (!idev->uhid_created)
+		return 0;
+
+	/* Only destroy the node if virtual cable unplug flag has been set */
+	if (!idev->virtual_cable_unplug)
 		return 0;
 
 	bt_uhid_unregister_all(idev->uhid);

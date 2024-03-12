@@ -169,6 +169,7 @@ struct ltk_info {
 struct csrk_info {
 	uint8_t key[16];
 	uint32_t counter;
+	bool auth;
 };
 
 struct sirk_info {
@@ -400,6 +401,7 @@ static void store_csrk(struct csrk_info *csrk, GKeyFile *key_file,
 
 	g_key_file_set_string(key_file, group, "Key", key);
 	g_key_file_set_integer(key_file, group, "Counter", csrk->counter);
+	g_key_file_set_boolean(key_file, group, "Authenticated", csrk->auth);
 }
 
 static void store_sirk(struct sirk_info *sirk, GKeyFile *key_file,
@@ -1955,6 +1957,52 @@ bool btd_device_get_ltk(struct btd_device *device, uint8_t key[16],
 	return true;
 }
 
+void device_set_csrk(struct btd_device *device, const uint8_t val[16],
+				uint32_t counter, uint8_t type,
+				bool store_hint)
+{
+	struct csrk_info **handle;
+	struct csrk_info *csrk;
+	bool auth;
+
+	switch (type) {
+	case 0x00:
+		handle = &device->local_csrk;
+		auth = FALSE;
+		break;
+	case 0x01:
+		handle = &device->remote_csrk;
+		auth = FALSE;
+		break;
+	case 0x02:
+		handle = &device->local_csrk;
+		auth = TRUE;
+		break;
+	case 0x03:
+		handle = &device->remote_csrk;
+		auth = TRUE;
+		break;
+	default:
+		warn("Unsupported CSRK type %u", type);
+		return;
+	}
+
+	if (!*handle)
+		*handle = g_new0(struct csrk_info, 1);
+
+	csrk = *handle;
+	memcpy(csrk->key, val, sizeof(csrk->key));
+	csrk->counter = counter;
+	csrk->auth = auth;
+
+	if (!store_hint)
+		return;
+
+	store_device_info(device);
+
+	btd_device_set_temporary(device, false);
+}
+
 static bool match_sirk(const void *data, const void *match_data)
 {
 	const struct sirk_info *sirk = data;
@@ -3225,7 +3273,11 @@ uint8_t btd_device_get_bdaddr_type(struct btd_device *dev)
 
 bool btd_device_is_connected(struct btd_device *dev)
 {
-	return dev->bredr_state.connected || dev->le_state.connected;
+	if (dev->bredr_state.connected || dev->le_state.connected)
+		return true;
+
+	return find_service_with_state(dev->services,
+						BTD_SERVICE_STATE_CONNECTED);
 }
 
 static void clear_temporary_timer(struct btd_device *dev)
@@ -3275,6 +3327,20 @@ void device_add_connection(struct btd_device *dev, uint8_t bdaddr_type,
 static bool device_disappeared(gpointer user_data)
 {
 	struct btd_device *dev = user_data;
+
+	if (btd_device_is_connected(dev)) {
+		char addr[18];
+		ba2str(&dev->bdaddr, addr);
+		DBG("Device %s is marked as connected", dev->path);
+		return TRUE;
+	}
+
+	/* If there are services connecting restart the timer to give more time
+	 * for the service to either complete the connection or disconnect.
+	 */
+	if (find_service_with_state(dev->services,
+					BTD_SERVICE_STATE_CONNECTING))
+		return TRUE;
 
 	dev->temporary_timer = 0;
 
@@ -4493,6 +4559,11 @@ void device_update_last_seen(struct btd_device *device, uint8_t bdaddr_type,
 
 	/* Restart temporary timer */
 	set_temporary_timer(device, btd_opts.tmpto);
+}
+
+void btd_device_set_connectable(struct btd_device *device, bool connectable)
+{
+	device_update_last_seen(device, device->bdaddr_type, connectable);
 }
 
 /* It is possible that we have two device objects for the same device in
