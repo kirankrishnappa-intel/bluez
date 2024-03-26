@@ -841,6 +841,9 @@ static struct bap_setup *setup_new(struct bap_ep *ep)
 		/* Mark BIG and BIS to be auto assigned */
 		setup->qos.bcast.big = BT_ISO_QOS_BIG_UNSET;
 		setup->qos.bcast.bis = BT_ISO_QOS_BIS_UNSET;
+		setup->qos.bcast.sync_factor = 0x01;
+		setup->qos.bcast.sync_timeout = BT_ISO_SYNC_TIMEOUT;
+		setup->qos.bcast.timeout = BT_ISO_SYNC_TIMEOUT;
 		setup->qos_parser = setup_parse_bcast_qos;
 		setup->destroy = setup_bcast_destroy;
 	} else {
@@ -1145,10 +1148,14 @@ static const GDBusMethodTable ep_methods[] = {
 	{ },
 };
 
+static void ep_cancel_select(struct bap_ep *ep);
+
 static void ep_free(void *data)
 {
 	struct bap_ep *ep = data;
 	struct queue *setups = ep->setups;
+
+	ep_cancel_select(ep);
 
 	ep->setups = NULL;
 	queue_destroy(setups, setup_free);
@@ -1421,6 +1428,24 @@ static bool pac_select(struct bt_bap_pac *lpac, struct bt_bap_pac *rpac,
 		bt_bap_select(lpac, rpac, &ep->data->selecting, select_cb, ep);
 
 	return true;
+}
+
+static bool pac_cancel_select(struct bt_bap_pac *lpac, struct bt_bap_pac *rpac,
+							void *user_data)
+{
+	struct bap_ep *ep = user_data;
+
+	bt_bap_cancel_select(lpac, select_cb, ep);
+
+	return true;
+}
+
+static void ep_cancel_select(struct bap_ep *ep)
+{
+	struct bt_bap *bap = ep->data->bap;
+
+	bt_bap_foreach_pac(bap, BT_BAP_SOURCE, pac_cancel_select, ep);
+	bt_bap_foreach_pac(bap, BT_BAP_SINK, pac_cancel_select, ep);
 }
 
 static bool pac_found_bcast(struct bt_bap_pac *lpac, struct bt_bap_pac *rpac,
@@ -1853,6 +1878,8 @@ static void setup_connect_io(struct bap_data *data, struct bap_setup *setup,
 	io = bt_io_connect(bap_connect_io_cb, setup, NULL, &err,
 				BT_IO_OPT_SOURCE_BDADDR,
 				btd_adapter_get_address(adapter),
+				BT_IO_OPT_SOURCE_TYPE,
+				btd_adapter_get_address_type(adapter),
 				BT_IO_OPT_DEST_BDADDR,
 				device_get_address(data->device),
 				BT_IO_OPT_DEST_TYPE,
@@ -1909,6 +1936,8 @@ static void setup_connect_io_broadcast(struct bap_data *data,
 	io = bt_io_connect(bap_connect_bcast_io_cb, setup, NULL, &err,
 			BT_IO_OPT_SOURCE_BDADDR,
 			btd_adapter_get_address(adapter),
+			BT_IO_OPT_SOURCE_TYPE,
+			btd_adapter_get_address_type(adapter),
 			BT_IO_OPT_DEST_BDADDR,
 			&dst_addr,
 			BT_IO_OPT_DEST_TYPE,
@@ -1949,6 +1978,8 @@ static void setup_listen_io(struct bap_data *data, struct bt_bap_stream *stream,
 	io = bt_io_listen(NULL, iso_confirm_cb, data, NULL, &err,
 				BT_IO_OPT_SOURCE_BDADDR,
 				btd_adapter_get_address(adapter),
+				BT_IO_OPT_SOURCE_TYPE,
+				btd_adapter_get_address_type(adapter),
 				BT_IO_OPT_DEST_BDADDR,
 				BDADDR_ANY,
 				BT_IO_OPT_DEST_TYPE,
@@ -2731,6 +2762,8 @@ static int short_lived_pa_sync(struct bap_bcast_pa_req *req)
 			NULL, &err,
 			BT_IO_OPT_SOURCE_BDADDR,
 			btd_adapter_get_address(data->adapter),
+			BT_IO_OPT_SOURCE_TYPE,
+			btd_adapter_get_address_type(data->adapter),
 			BT_IO_OPT_DEST_BDADDR,
 			device_get_address(data->device),
 			BT_IO_OPT_DEST_TYPE,
